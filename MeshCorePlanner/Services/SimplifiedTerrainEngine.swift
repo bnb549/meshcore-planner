@@ -44,7 +44,11 @@ nonisolated struct SimplifiedTerrainEngine: PropagationEngine {
             forward: directional(tx: request.from, rx: request.to, loss: forwardLoss, sensitivity: request.sensitivityDbm),
             reverse: directional(tx: request.to, rx: request.from, loss: reverseLoss, sensitivity: request.sensitivityDbm),
             profile: forwardLoss.profile,
-            usedFreeSpaceFallback: forwardLoss.usedFreeSpaceFallback
+            usedFreeSpaceFallback: forwardLoss.usedFreeSpaceFallback,
+            engineName: "Simplified",
+            modelNote: forwardLoss.usedFreeSpaceFallback
+                ? "No terrain samples. Showing free-space and two-ray loss only."
+                : "Simplified model. One knife edge if terrain crosses the line of sight. Trees and buildings are ignored."
         )
     }
 

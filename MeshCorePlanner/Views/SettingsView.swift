@@ -22,12 +22,60 @@ struct SettingsView: View {
             }
 
             Section("Simulation") {
+                Picker("Propagation", selection: $store.propagationModel) {
+                    ForEach(PropagationModel.allCases) { model in
+                        Text(model.title).tag(model)
+                    }
+                }
+                .accessibilityLabel("Propagation engine")
+                Picker("Density", selection: $store.simulationQuality) {
+                    ForEach(SimulationQuality.allCases) { quality in
+                        Text(quality.title).tag(quality)
+                    }
+                }
+                .accessibilityLabel("Coverage density")
                 VStack(alignment: .leading) {
                     Text("Maximum range \(String(format: "%.0f km", store.maxRangeKm))")
                     Slider(value: $store.maxRangeKm, in: 0.5...50, step: 0.5)
                         .accessibilityLabel("Maximum simulation range")
                 }
-                Text("High-resolution coverage is capped at 50 km.")
+                Text("ITM is the default. Simplified is the fast fallback when terrain is missing. Fine density uses closer samples and stays capped at 50 km. Recompute a site after changing the engine.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("ITM assumptions") {
+                Picker("Climate", selection: $store.itmClimate) {
+                    ForEach(ITMClimate.allCases) { climate in
+                        Text(climate.title).tag(climate)
+                    }
+                }
+                Picker("Variability", selection: $store.itmVariability) {
+                    ForEach(ITMVariability.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                Toggle("Vertical polarization", isOn: $store.itmPolarizationVertical)
+                    .accessibilityHint("LoRa planning uses vertical polarization.")
+                Stepper(value: $store.itmTimePercent, in: 1...99, step: 1) {
+                    Text("Time \(Int(store.itmTimePercent.rounded()))%")
+                }
+                Stepper(value: $store.itmLocationPercent, in: 1...99, step: 1) {
+                    Text("Location \(Int(store.itmLocationPercent.rounded()))%")
+                }
+                Stepper(value: $store.itmSituationPercent, in: 1...99, step: 1) {
+                    Text("Situation \(Int(store.itmSituationPercent.rounded()))%")
+                }
+                Stepper(value: $store.itmDielectric, in: 2...80, step: 1) {
+                    Text("Dielectric \(Int(store.itmDielectric.rounded()))")
+                }
+                Stepper(value: $store.itmConductivity, in: 0.001...0.05, step: 0.001) {
+                    Text("Conductivity \(String(format: "%.3f S/m", store.itmConductivity))")
+                }
+                Stepper(value: $store.itmRefractivity, in: 250...400, step: 1) {
+                    Text("Refractivity \(Int(store.itmRefractivity.rounded())) N")
+                }
+                Text("The default 50/50/50 broadcast case is a median prediction, in the spirit of an F(50,50) curve. ITM ignores buildings and trees. It is not a guarantee.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

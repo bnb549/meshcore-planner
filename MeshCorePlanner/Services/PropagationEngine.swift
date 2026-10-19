@@ -104,6 +104,7 @@ nonisolated struct CoverageRequest: Sendable {
     var sensitivityDbm: Double
     var radialCount: Int
     var ringCount: Int
+    var sampleSpacingM: Double
 
     init(
         transmitter: RadioEndpoint,
@@ -113,7 +114,8 @@ nonisolated struct CoverageRequest: Sendable {
         receiverCableLossDb: Double = 0,
         sensitivityDbm: Double,
         radialCount: Int = 36,
-        ringCount: Int = 24
+        ringCount: Int = 24,
+        sampleSpacingM: Double = 500
     ) {
         self.transmitter = transmitter
         self.maxRangeM = maxRangeM
@@ -123,6 +125,7 @@ nonisolated struct CoverageRequest: Sendable {
         self.sensitivityDbm = sensitivityDbm
         self.radialCount = radialCount
         self.ringCount = ringCount
+        self.sampleSpacingM = sampleSpacingM
     }
 }
 
@@ -135,6 +138,7 @@ nonisolated struct ProfileSample: Sendable, Identifiable {
     var terrainWithBulge: Double
     var losAMSL: Double
     var fresnel60AMSL: Double
+    var fresnel1AMSL: Double
     var protrusionM: Double
 }
 
@@ -157,6 +161,8 @@ nonisolated struct LinkResult: Sendable {
     var reverse: DirectionalLink
     var profile: [ProfileSample]
     var usedFreeSpaceFallback: Bool
+    var engineName: String
+    var modelNote: String
 
     var weakestMarginDb: Double { min(forward.marginDb, reverse.marginDb) }
 }
@@ -184,6 +190,7 @@ nonisolated struct CoverageGrid: Sendable {
     var maxRangeM: Double
     var elevationStatus: ElevationStatus
     var usedFreeSpaceFallback: Bool
+    var engineName: String = "Simplified"
 
     var diskAreaM2: Double { .pi * maxRangeM * maxRangeM }
 
@@ -378,6 +385,7 @@ nonisolated enum PropagationMath {
                     terrainWithBulge: ground + bulge,
                     losAMSL: chord,
                     fresnel60AMSL: chord - 0.6 * fresnelRadius,
+                    fresnel1AMSL: chord - fresnelRadius,
                     protrusionM: hasElevation ? protrusion : 0
                 ))
             }

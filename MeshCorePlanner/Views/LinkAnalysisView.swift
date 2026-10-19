@@ -9,9 +9,7 @@ struct LinkAnalysisView: View {
     var body: some View {
         let others = store.sites.filter { $0.id != site.id }
         if others.isEmpty {
-            Text("Drop another site to check whether this one can hear it. The margin shown is the weaker direction.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            InspectorNote(text: "Drop another site to check whether this one can hear it. The margin shown is the weaker direction.")
         } else {
             Picker("Other site", selection: $otherID) {
                 Text("Choose").tag(Optional<UUID>.none)
@@ -20,6 +18,8 @@ struct LinkAnalysisView: View {
                 }
             }
             if let other = others.first(where: { $0.id == otherID }) {
+                Toggle("Compare engines", isOn: $store.compareEngines)
+                    .accessibilityHint("Shows the other propagation model beside the selected one.")
                 Button(store.linkRunning ? "Analyzing…" : "Analyze Link") {
                     Task { await store.analyzeLink(from: site, to: other) }
                 }
@@ -30,9 +30,7 @@ struct LinkAnalysisView: View {
                         .accessibilityLabel("Analyzing link")
                 }
                 if let message = store.linkMessage {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+                    InspectorNote(text: message, tint: .red)
                 }
                 if let result = activeResult {
                     resultBody(result, other: other)
@@ -50,8 +48,9 @@ struct LinkAnalysisView: View {
 
     @ViewBuilder
     private func resultBody(_ result: LinkResult, other: PlannedSite) -> some View {
-        LabeledContent("Distance", value: FieldFormat.distance(result.distanceM))
-        LabeledContent("Bearing", value: FieldFormat.bearing(result.bearingFromToDeg))
+        InspectorFact(title: "Engine", value: result.engineName)
+        InspectorFact(title: "Distance", value: FieldFormat.distance(result.distanceM))
+        InspectorFact(title: "Bearing", value: FieldFormat.bearing(result.bearingFromToDeg))
         directionRow(
             title: "\(site.name) → \(other.name)",
             link: result.forward,
@@ -62,17 +61,19 @@ struct LinkAnalysisView: View {
             link: result.reverse,
             limiting: result.reverse.marginDb < result.forward.marginDb
         )
-        LabeledContent("Weakest margin", value: FieldFormat.decibels(result.weakestMarginDb))
-        LabeledContent(
-            "Fresnel clearance",
+        InspectorFact(title: "Weakest margin", value: FieldFormat.decibels(result.weakestMarginDb))
+        if store.compareEngines, let comparison = store.comparisonResult {
+            InspectorFact(title: "\(comparison.engineName) margin", value: FieldFormat.decibels(comparison.weakestMarginDb))
+            InspectorNote(text: comparison.modelNote)
+        }
+        InspectorFact(
+            title: "Fresnel clearance",
             value: result.forward.fresnelClear
                 ? String(format: "%.0f%% of F1", result.forward.fresnelClearanceRatio * 100)
                 : String(format: "Blocked (%.0f%% of F1)", result.forward.fresnelClearanceRatio * 100)
         )
-        if result.usedFreeSpaceFallback {
-            Text("Terrain was unavailable, so this profile is a free-space estimate.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+        if !result.modelNote.isEmpty {
+            InspectorNote(text: result.modelNote)
         }
         if !result.profile.isEmpty {
             TerrainProfileChart(samples: result.profile)
@@ -87,20 +88,23 @@ struct LinkAnalysisView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(limiting ? "\(title) · limiting" : title)
                 .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Text("EIRP \(FieldFormat.dBm(link.eirpDbm)) · loss \(FieldFormat.decibels(link.pathLossDb)) · received \(FieldFormat.dBm(link.receivedPowerDbm)) · margin \(FieldFormat.decibels(link.marginDb))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
     }
 
     private func cachedBody(_ link: PlannedLink) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Saved margin \(FieldFormat.decibels(link.weakestMarginDb)) over \(FieldFormat.distance(link.distanceM)).")
-                .font(.footnote)
-            Text("Run analysis again to draw the terrain profile.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            InspectorNote(text: "Saved margin \(FieldFormat.decibels(link.weakestMarginDb)) over \(FieldFormat.distance(link.distanceM)).")
+            InspectorNote(text: "Run analysis again to draw the terrain profile.")
         }
     }
 }
@@ -124,6 +128,15 @@ struct TerrainProfileChart: View {
                     series: .value("Series", "Line of sight")
                 )
                 .foregroundStyle(Color.blue)
+            }
+            ForEach(samples) { sample in
+                LineMark(
+                    x: .value("Distance", sample.distanceM / 1_000),
+                    y: .value("Meters", sample.fresnel1AMSL),
+                    series: .value("Series", "First Fresnel")
+                )
+                .foregroundStyle(Color.orange.opacity(0.7))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
             }
             ForEach(samples) { sample in
                 LineMark(

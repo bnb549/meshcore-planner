@@ -84,16 +84,19 @@ struct RootView: View {
                 onSelectSite: { site in store.selectedSiteID = site.id }
             )
         } detail: {
-            if let site = store.selectedSite {
-                SiteInspectorView(site: site, store: store)
-                    .id(site.id)
-            } else {
-                ContentUnavailableView(
-                    "No Site Selected",
-                    systemImage: "mappin.and.ellipse",
-                    description: Text("Choose a site, or choose Drop and tap the map.")
-                )
+            Group {
+                if let site = store.selectedSite {
+                    SiteInspectorView(site: site, store: store)
+                        .id(site.id)
+                } else {
+                    ContentUnavailableView(
+                        "No Site Selected",
+                        systemImage: "mappin.and.ellipse",
+                        description: Text("Choose a site, or choose Drop and tap the map.")
+                    )
+                }
             }
+            .navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 480)
         }
         .navigationSplitViewStyle(.balanced)
     }

@@ -85,7 +85,7 @@ final class PlannerStore {
     let container: ModelContainer
     private let modelContext: ModelContext
     let elevation: ElevationService
-    private let engine: any PropagationEngine
+    private let injectedEngine: (any PropagationEngine)?
 
     var sites: [PlannedSite] = []
     var links: [PlannedLink] = []
@@ -104,6 +104,8 @@ final class PlannerStore {
     var highpointMessage: String?
     var highpointRunning = false
     var linkResult: LinkResult?
+    var comparisonResult: LinkResult?
+    var compareEngines = false
     var linkPair: (UUID, UUID)?
     var linkRunning = false
     var linkMessage: String?
@@ -160,13 +162,57 @@ final class PlannerStore {
         didSet { UserDefaults.standard.set(colorScale.rawValue, forKey: SettingsKey.colorScale) }
     }
 
+    var propagationModel: PropagationModel {
+        didSet { UserDefaults.standard.set(propagationModel.rawValue, forKey: SettingsKey.model) }
+    }
+
+    var simulationQuality: SimulationQuality {
+        didSet { UserDefaults.standard.set(simulationQuality.rawValue, forKey: SettingsKey.quality) }
+    }
+
+    var itmClimate: ITMClimate {
+        didSet { UserDefaults.standard.set(itmClimate.rawValue, forKey: SettingsKey.climate) }
+    }
+
+    var itmVariability: ITMVariability {
+        didSet { UserDefaults.standard.set(itmVariability.rawValue, forKey: SettingsKey.variability) }
+    }
+
+    var itmPolarizationVertical: Bool {
+        didSet { UserDefaults.standard.set(itmPolarizationVertical, forKey: SettingsKey.polarization) }
+    }
+
+    var itmTimePercent: Double {
+        didSet { persist(itmTimePercent, SettingsKey.time) }
+    }
+
+    var itmLocationPercent: Double {
+        didSet { persist(itmLocationPercent, SettingsKey.location) }
+    }
+
+    var itmSituationPercent: Double {
+        didSet { persist(itmSituationPercent, SettingsKey.situation) }
+    }
+
+    var itmDielectric: Double {
+        didSet { persist(itmDielectric, SettingsKey.dielectric) }
+    }
+
+    var itmConductivity: Double {
+        didSet { persist(itmConductivity, SettingsKey.conductivity) }
+    }
+
+    var itmRefractivity: Double {
+        didSet { persist(itmRefractivity, SettingsKey.refractivity) }
+    }
+
     private let locationClient = LocationClient()
 
     init(modelContext: ModelContext, container: ModelContainer, elevation: ElevationService = ElevationService(), engine: (any PropagationEngine)? = nil) {
         self.modelContext = modelContext
         self.container = container
         self.elevation = elevation
-        self.engine = engine ?? SimplifiedTerrainEngine()
+        self.injectedEngine = engine
 
         let defaults = UserDefaults.standard
         let sensitivity = defaults.object(forKey: SettingsKey.sensitivity) as? Double ?? -130
@@ -185,6 +231,17 @@ final class PlannerStore {
         overlayOpacity = opacity
         basemap = Basemap(rawValue: defaults.string(forKey: SettingsKey.basemap) ?? "") ?? .standard
         colorScale = CoverageColorScale(rawValue: defaults.string(forKey: SettingsKey.colorScale) ?? "") ?? .coverage
+        propagationModel = PropagationModel(rawValue: defaults.string(forKey: SettingsKey.model) ?? "") ?? .itm
+        simulationQuality = SimulationQuality(rawValue: defaults.string(forKey: SettingsKey.quality) ?? "") ?? .standard
+        itmClimate = ITMClimate(rawValue: defaults.integer(forKey: SettingsKey.climate)) ?? .continentalTemperate
+        itmVariability = ITMVariability(rawValue: defaults.object(forKey: SettingsKey.variability) as? Int ?? ITMVariability.broadcast.rawValue) ?? .broadcast
+        itmPolarizationVertical = defaults.object(forKey: SettingsKey.polarization) as? Bool ?? true
+        itmTimePercent = defaults.object(forKey: SettingsKey.time) as? Double ?? 50
+        itmLocationPercent = defaults.object(forKey: SettingsKey.location) as? Double ?? 50
+        itmSituationPercent = defaults.object(forKey: SettingsKey.situation) as? Double ?? 50
+        itmDielectric = defaults.object(forKey: SettingsKey.dielectric) as? Double ?? 15
+        itmConductivity = defaults.object(forKey: SettingsKey.conductivity) as? Double ?? 0.005
+        itmRefractivity = defaults.object(forKey: SettingsKey.refractivity) as? Double ?? 301
         mapCenter = Coordinate(latitude: latitude, longitude: longitude)
         latitudeDelta = spanLat
         longitudeDelta = spanLon
@@ -359,7 +416,7 @@ final class PlannerStore {
         coverageTasks[id]?.cancel()
         runningSiteIDs.insert(id)
         progress[id] = 0
-        let engine = self.engine
+        let engine = selectedEngine()
         let elevation = self.elevation
         coverageTasks[id] = Task {
             let stream = engine.coverage(request, elevation: elevation)
@@ -403,12 +460,18 @@ final class PlannerStore {
         }
         linkRunning = true
         linkMessage = nil
+        comparisonResult = nil
         linkPair = (from.id, to.id)
         defer { linkRunning = false }
         let request = LinkRequest(from: from.radioEndpoint(), to: to.radioEndpoint(), sensitivityDbm: receiverSensitivityDbm)
+        let primary = selectedEngine()
+        let secondary = compareEngines ? alternateEngine() : nil
         do {
-            let result = try await engine.link(request, elevation: elevation)
+            let result = try await primary.link(request, elevation: elevation)
             linkResult = result
+            if let secondary {
+                comparisonResult = try await secondary.link(request, elevation: elevation)
+            }
             upsertLink(from: from, to: to, result: result)
         } catch is CancellationError {
             return
@@ -524,6 +587,7 @@ final class PlannerStore {
                 return
             }
             let request = LinkRequest(from: from.radioEndpoint(), to: to.radioEndpoint(), sensitivityDbm: receiverSensitivityDbm)
+            let engine = selectedEngine()
             do {
                 let result = try await engine.link(request, elevation: elevation)
                 hops.append(HopResult(
@@ -595,6 +659,10 @@ final class PlannerStore {
         GeoMath.distanceM(from: mapCenter, to: site.coordinate)
     }
 
+    func coverageFingerprintsMatch(_ site: PlannedSite) -> Bool {
+        coverageFingerprints[site.id] == fingerprint(for: site)
+    }
+
     func fingerprint(for site: PlannedSite) -> String {
         [
             String(format: "%.5f", site.latitude),
@@ -606,7 +674,18 @@ final class PlannerStore {
             String(format: "%.3f", site.frequencyMHz),
             String(format: "%.2f", receiverHeightM),
             String(format: "%.2f", receiverGainDbi),
-            String(format: "%.2f", maxRangeKm)
+            String(format: "%.2f", maxRangeKm),
+            propagationModel.rawValue,
+            simulationQuality.rawValue,
+            String(itmClimate.rawValue),
+            String(itmVariability.rawValue),
+            itmPolarizationVertical ? "V" : "H",
+            String(format: "%.0f", itmTimePercent),
+            String(format: "%.0f", itmLocationPercent),
+            String(format: "%.0f", itmSituationPercent),
+            String(format: "%.2f", itmDielectric),
+            String(format: "%.4f", itmConductivity),
+            String(format: "%.0f", itmRefractivity)
         ].joined(separator: "|")
     }
 
@@ -628,8 +707,43 @@ final class PlannerStore {
             receiverHeightM: receiverHeightM,
             receiverGainDbi: receiverGainDbi,
             receiverCableLossDb: 0,
-            sensitivityDbm: receiverSensitivityDbm
+            sensitivityDbm: receiverSensitivityDbm,
+            radialCount: simulationQuality.radialCount,
+            ringCount: simulationQuality.ringCount,
+            sampleSpacingM: simulationQuality.sampleSpacingM
         )
+    }
+
+    private func currentITMParameters() -> ITMParameters {
+        ITMParameters(
+            climate: itmClimate,
+            polarizationVertical: itmPolarizationVertical,
+            dielectric: itmDielectric,
+            conductivity: itmConductivity,
+            refractivity: itmRefractivity,
+            variability: itmVariability,
+            timePercent: itmTimePercent,
+            locationPercent: itmLocationPercent,
+            situationPercent: itmSituationPercent
+        )
+    }
+
+    private func makeEngine(_ model: PropagationModel) -> any PropagationEngine {
+        switch model {
+        case .itm:
+            ITMPropagationEngine(parameters: currentITMParameters(), sampleSpacingM: simulationQuality.sampleSpacingM)
+        case .simplified:
+            SimplifiedTerrainEngine()
+        }
+    }
+
+    private func selectedEngine() -> any PropagationEngine {
+        if let injectedEngine { return injectedEngine }
+        return makeEngine(propagationModel)
+    }
+
+    private func alternateEngine() -> any PropagationEngine {
+        makeEngine(propagationModel == .itm ? .simplified : .itm)
     }
 
     private func scheduleSettingsRefresh() {
@@ -717,4 +831,15 @@ private enum SettingsKey {
     static let longitude = "mapLongitude"
     static let spanLatitude = "mapSpanLatitude"
     static let spanLongitude = "mapSpanLongitude"
+    static let model = "propagationModel"
+    static let quality = "simulationQuality"
+    static let climate = "itmClimate"
+    static let variability = "itmVariability"
+    static let polarization = "itmPolarizationVertical"
+    static let time = "itmTimePercent"
+    static let location = "itmLocationPercent"
+    static let situation = "itmSituationPercent"
+    static let dielectric = "itmDielectric"
+    static let conductivity = "itmConductivity"
+    static let refractivity = "itmRefractivity"
 }

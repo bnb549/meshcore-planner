@@ -16,11 +16,11 @@ Requirements: Xcode 16 or newer, iOS 17+, macOS 14+.
 
 The app target is `MeshCorePlanner`, the module is `MeshCorePlanner`, the display name is MeshCore Planner, and the bundle id is `com.benmonroe.meshcoreplanner`. Marketing version 0.1.0 and build 1 are recorded in `VERSION.md` and in the Xcode target.
 
-On macOS the app is sandboxed, with the Hardened Runtime enabled. Outbound network access is used only for elevation tiles. Location is requested only when you tap My Location, and only to drop a site.
+On macOS the app is sandboxed, with the Hardened Runtime enabled. Outbound network access is used only for elevation tiles. Location is requested only when you tap My Location, and only to center the map.
 
 ## What you can do
 
-- Long-press the map, or choose Drop and tap, to place a repeater. Drag a marker to move it, or edit coordinates in the inspector.
+- Choose Drop and tap the map to place a repeater. Drag a marker to move it, or edit coordinates in the inspector.
 - Hide a site with the visibility toggle. A hidden site stays in the list with an eye-slash icon. Its marker is dimmed and dashed, and its coverage is not drawn. Show All and Hide All are in the list toolbar.
 - Apply a hardware preset (TX power and antenna gain) and a regional radio preset (frequency, plus bandwidth, spreading factor, and coding-rate notes).
 - Estimate coverage for a reference handheld. The overlay is colored from stored RSSI, so opacity and the color scale do not resimulate.

@@ -44,6 +44,9 @@ struct MapCanvasView: View {
                             .accessibilityLabel("Hop \(hop.id + 1), margin \(FieldFormat.dBm(hop.marginDb))")
                     }
                 }
+                if store.showsUserLocation {
+                    UserAnnotation()
+                }
                 ForEach(store.sites) { site in
                     Annotation(site.name, coordinate: mapCoordinate(site.coordinate), anchor: .bottom) {
                         SiteMarker(
@@ -67,7 +70,6 @@ struct MapCanvasView: View {
                 MapPitchToggle()
             }
             .simultaneousGesture(tapGesture(proxy))
-            .simultaneousGesture(longPressGesture(proxy))
             .onMapCameraChange(frequency: .onEnd) { context in
                 store.noteRegion(context.region)
             }
@@ -131,7 +133,7 @@ struct MapCanvasView: View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Drop the first repeater", systemImage: "antenna.radiowaves.left.and.right")
                 .font(.headline)
-            Text("Long-press the map to place a site. Companions do not relay, so coverage comes from dedicated repeaters.")
+            Text("Choose Drop, then tap the map. Companions do not relay, so coverage comes from dedicated repeaters.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Button("Drop at map center") {
@@ -165,7 +167,7 @@ struct MapCanvasView: View {
                 .buttonStyle(.bordered)
                 .disabled(store.locationDenied)
                 .accessibilityLabel("My Location")
-                .accessibilityHint(store.locationDenied ? "Location permission is off. The map still works." : "Drops a repeater at your current location.")
+                .accessibilityHint(store.locationDenied ? "Location permission is off. The map still works." : "Centers the map on your current location.")
                 Menu {
                     Picker("Basemap", selection: $store.basemap) {
                         ForEach(Basemap.allCases) { item in
@@ -285,17 +287,6 @@ struct MapCanvasView: View {
                 break
             }
         }
-    }
-
-    private func longPressGesture(_ proxy: MapProxy) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.45)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
-            .onEnded { value in
-                guard store.mapTool != .drop else { return }
-                guard case .second(true, let drag) = value, let location = drag?.location,
-                      let converted = proxy.convert(location, from: .local) else { return }
-                store.dropSite(at: Coordinate(latitude: converted.latitude, longitude: converted.longitude))
-            }
     }
 
     private func mapCoordinate(_ coordinate: Coordinate) -> CLLocationCoordinate2D {

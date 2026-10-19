@@ -22,7 +22,7 @@ final class LocationClient: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    func requestPlacementFix() {
+    func requestCurrentLocation() {
         let status = manager.authorizationStatus
         if status == .notDetermined {
             waitingForFix = true

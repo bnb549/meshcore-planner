@@ -29,7 +29,7 @@ struct SiteListView: View {
                     store.sites.isEmpty ? "No Sites Yet" : "No Matches",
                     systemImage: "mappin.slash",
                     description: Text(store.sites.isEmpty
-                        ? "Long-press the map to drop the first repeater."
+                        ? "Choose Drop, then tap the map to place the first repeater."
                         : "Try a different name.")
                 )
             } else {

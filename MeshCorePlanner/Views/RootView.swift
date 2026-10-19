@@ -91,7 +91,7 @@ struct RootView: View {
                 ContentUnavailableView(
                     "No Site Selected",
                     systemImage: "mappin.and.ellipse",
-                    description: Text("Choose a site or long-press the map to drop a repeater.")
+                    description: Text("Choose a site, or choose Drop and tap the map.")
                 )
             }
         }

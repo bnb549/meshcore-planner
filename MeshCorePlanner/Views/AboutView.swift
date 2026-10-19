@@ -14,7 +14,7 @@ struct AboutView: View {
                 Text("The interactive site-planner idea is indebted to the Meshtastic Site Planner concept. Terrain-aware radio planning descends from the Longley-Rice / ITM model and John Magliacane’s SPLAT!. This app does not copy that source. The engine is an original approximation: distance, antenna height, earth curvature, and a single knife edge on sampled elevation.")
             }
             Section("Privacy") {
-                Text("Sites are stored locally with SwiftData. There is no analytics. Location is used only when you tap My Location, to drop a site. Elevation requests send coordinates or tile indexes, never site names or radio settings.")
+                Text("Sites are stored locally with SwiftData. There is no analytics. Location is used only when you tap My Location, to center the map. Elevation requests send coordinates or tile indexes, never site names or radio settings.")
             }
             Section("License") {
                 Text("MIT License. Copyright © 2026 Benjamin Monroe.")

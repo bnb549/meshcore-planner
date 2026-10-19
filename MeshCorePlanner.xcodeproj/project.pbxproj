@@ -343,8 +343,8 @@
 				INFOPLIST_KEY_CFBundleName = "MeshCore Planner";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSLocationUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to drop a planned site.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to drop a planned site.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to center the map.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to center the map.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -397,8 +397,8 @@
 				INFOPLIST_KEY_CFBundleName = "MeshCore Planner";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSLocationUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to drop a planned site.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to drop a planned site.";
+				INFOPLIST_KEY_NSLocationUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to center the map.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "MeshCore Planner uses your location only when you tap My Location, to center the map.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

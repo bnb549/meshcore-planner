@@ -121,6 +121,7 @@ final class PlannerStore {
     var longitudeDelta: Double
     var mapSize: CGSize = CGSize(width: 400, height: 700)
     var locationDenied: Bool
+    var showsUserLocation = false
 
     var receiverSensitivityDbm: Double {
         didSet { persist(receiverSensitivityDbm, SettingsKey.sensitivity) }
@@ -193,9 +194,9 @@ final class PlannerStore {
         ))
         locationDenied = locationClient.isDenied
         locationClient.onLocation = { [weak self] latitude, longitude in
-            let coordinate = Coordinate(latitude: latitude, longitude: longitude)
-            self?.dropSite(at: coordinate)
-            self?.centerMap(on: coordinate)
+            guard let self else { return }
+            self.showsUserLocation = true
+            self.centerMap(on: Coordinate(latitude: latitude, longitude: longitude))
         }
         locationClient.onAuthorizationChange = { [weak self] denied in
             self?.locationDenied = denied
@@ -253,7 +254,7 @@ final class PlannerStore {
 
     func requestMyLocation() {
         guard !locationDenied else { return }
-        locationClient.requestPlacementFix()
+        locationClient.requestCurrentLocation()
     }
 
     func centerMap(on coordinate: Coordinate) {

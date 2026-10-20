@@ -2,10 +2,32 @@ import Foundation
 import CoreGraphics
 import ImageIO
 
+nonisolated enum ElevationResolutionPreference: String, CaseIterable, Identifiable, Sendable {
+    case prefer30m
+    case coarse
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .prefer30m: "30 m when available"
+        case .coarse: "About 90 m"
+        }
+    }
+}
+
+nonisolated enum TerrainTileOutcome: Equatable, Sendable {
+    case missing
+    case rejected
+    case failed
+}
+
 /// Fetches SRTM-derived elevation and caches it locally.
 /// Requests contain tile indexes or sample coordinates only. Do not add site names, power, or radio settings.
+/// Zoom 12 is about 30 m at mid-latitudes. Zoom 11, about 70–90 m, is the fallback.
 actor ElevationService: ElevationProviding {
     static let terrainZoom = 11
+    static let preferredZoom = 12
 
     private let session: URLSession
     private let cacheRoot: URL
@@ -13,6 +35,15 @@ actor ElevationService: ElevationProviding {
     private var pointCache: [String: Double] = [:]
     private var loadedPointCache = false
     private var terrariumDisabled = false
+    private var preference: ElevationResolutionPreference = .prefer30m
+
+    /// A 404 on a finer zoom is a miss. A 404 on zoom 11, or an auth failure, disables terrarium for this process.
+    static func terrainTileError(statusCode: Int, zoom: Int) -> TerrainTileOutcome? {
+        guard !(200...299).contains(statusCode) else { return nil }
+        if statusCode == 404, zoom > terrainZoom { return .missing }
+        if statusCode == 401 || statusCode == 403 || statusCode == 404 || statusCode == 410 { return .rejected }
+        return .failed
+    }
 
     init(cacheRoot: URL? = nil, session: URLSession? = nil) {
         let configuration = URLSessionConfiguration.ephemeral
@@ -33,6 +64,10 @@ actor ElevationService: ElevationProviding {
         URL(string: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/\(z)/\(x)/\(y).png")!
     }
 
+    func setPreference(_ preference: ElevationResolutionPreference) {
+        self.preference = preference
+    }
+
     func clearCache() {
         memoryTiles.removeAll()
         pointCache.removeAll()
@@ -48,14 +83,33 @@ actor ElevationService: ElevationProviding {
         }
         var values = Array<Double?>(repeating: nil, count: coordinates.count)
         var sawLive = false
+        var fineFilled = Set<Int>()
 
         if !terrariumDisabled {
-            let outcome = try await fillFromTerrarium(coordinates, into: &values)
+            let zoom = preference == .prefer30m ? Self.preferredZoom : Self.terrainZoom
+            let outcome = try await fillFromTerrarium(coordinates, zoom: zoom, into: &values, filled: &fineFilled)
             sawLive = outcome.sawLive
             if outcome.rejected {
                 terrariumDisabled = true
                 values = Array(repeating: nil, count: coordinates.count)
+                fineFilled.removeAll()
                 sawLive = false
+            } else if preference == .prefer30m {
+                let missing = values.indices.filter { values[$0] == nil }
+                if !missing.isEmpty && !terrariumDisabled {
+                    var ignored = Set<Int>()
+                    let fallback = try await fillFromTerrarium(
+                        coordinates,
+                        zoom: Self.terrainZoom,
+                        only: missing,
+                        into: &values,
+                        filled: &ignored
+                    )
+                    if fallback.sawLive { sawLive = true }
+                    if fallback.rejected {
+                        terrariumDisabled = true
+                    }
+                }
             }
         }
 
@@ -77,9 +131,16 @@ actor ElevationService: ElevationProviding {
         } else {
             status = .cache
         }
+        let wantsFine = preference == .prefer30m
+        let anyCoarse = wantsFine && values.indices.contains { values[$0] != nil && !fineFilled.contains($0) }
+        let note = anyCoarse
+            ? "30 m elevation was unavailable for part of this path. Coarser cached or zoom-11 terrain was used."
+            : nil
         return ElevationBatch(
             samples: values.map { ElevationSample(elevationM: $0) },
-            status: status
+            status: status,
+            resolutionReduced: anyCoarse,
+            resolutionNote: note
         )
     }
 
@@ -89,12 +150,18 @@ actor ElevationService: ElevationProviding {
         var rejected = false
     }
 
-    private func fillFromTerrarium(_ coordinates: [Coordinate], into values: inout [Double?]) async throws -> FillOutcome {
+    private func fillFromTerrarium(
+        _ coordinates: [Coordinate],
+        zoom: Int,
+        only indexes: [Int]? = nil,
+        into values: inout [Double?],
+        filled: inout Set<Int>
+    ) async throws -> FillOutcome {
         var outcome = FillOutcome()
-        let zoom = Self.terrainZoom
+        let target = indexes ?? Array(coordinates.indices)
         var grouped: [TileIndex: [(Int, Int, Int)]] = [:]
-        for (index, coordinate) in coordinates.enumerated() {
-            let pixel = TerrainIndex.pixel(for: coordinate, zoom: zoom)
+        for index in target where values[index] == nil && coordinates.indices.contains(index) {
+            let pixel = TerrainIndex.pixel(for: coordinates[index], zoom: zoom)
             grouped[pixel.tile, default: []].append((index, pixel.x, pixel.y))
         }
         for (tile, pixels) in grouped {
@@ -105,6 +172,8 @@ actor ElevationService: ElevationProviding {
                 let loaded = try await loadTile(tile)
                 decoded = loaded.tile
                 fromCache = loaded.fromCache
+            } catch TileFailure.missing {
+                continue
             } catch TileFailure.rejected {
                 outcome.rejected = true
                 return outcome
@@ -118,6 +187,7 @@ actor ElevationService: ElevationProviding {
                 let x = min(decoded.width - 1, max(0, px * decoded.width / 256))
                 let y = min(decoded.height - 1, max(0, py * decoded.height / 256))
                 values[index] = Double(decoded.elevations[y * decoded.width + x])
+                filled.insert(index)
             }
         }
         return outcome
@@ -134,11 +204,13 @@ actor ElevationService: ElevationProviding {
         }
         let url = Self.terrariumURL(z: tile.z, x: tile.x, y: tile.y)
         let (data, response) = try await session.data(from: url)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            if http.statusCode == 401 || http.statusCode == 403 || http.statusCode == 404 || http.statusCode == 410 {
-                throw TileFailure.rejected
+        if let http = response as? HTTPURLResponse,
+           let failure = Self.terrainTileError(statusCode: http.statusCode, zoom: tile.z) {
+            switch failure {
+            case .missing: throw TileFailure.missing
+            case .rejected: throw TileFailure.rejected
+            case .failed: throw TileFailure.failed
             }
-            throw TileFailure.failed
         }
         guard let decoded = Self.decodeTerrarium(data) else { throw TileFailure.failed }
         let folder = file.deletingLastPathComponent()
@@ -273,6 +345,7 @@ actor ElevationService: ElevationProviding {
 }
 
 private nonisolated enum TileFailure: Error {
+    case missing
     case rejected
     case failed
 }

@@ -39,9 +39,51 @@ struct SettingsView: View {
                     Slider(value: $store.maxRangeKm, in: 0.5...50, step: 0.5)
                         .accessibilityLabel("Maximum simulation range")
                 }
-                Text("ITM is the default. Simplified is the fast fallback when terrain is missing. Fine density uses closer samples and stays capped at 50 km. Recompute a site after changing the engine.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Toggle("Include clutter", isOn: $store.includeClutter)
+                    .accessibilityHint("Adds land-cover loss after ITM or Simplified. Off adds nothing. Recompute to apply it.")
+                Toggle("Multi-edge diffraction", isOn: $store.multiEdgeDiffraction)
+                    .accessibilityHint("Simplified engine only. Sums knife edges across more than one ridge.")
+                Picker("Elevation", selection: $store.elevationResolution) {
+                    ForEach(ElevationResolutionPreference.allCases) { preference in
+                        Text(preference.title).tag(preference)
+                    }
+                }
+                .accessibilityLabel("Elevation resolution")
+                InspectorNote(text: "ITM is the default. Simplified is the fast fallback when terrain is missing. Fine density uses closer samples and stays capped at 50 km. 30 m terrain is used when the tile service has it, and about 90 m otherwise. Recompute after changing the engine, clutter, or diffraction. Turning those off does not recompute by itself.")
+            }
+
+            Section("Land-cover clutter") {
+                InspectorNote(text: "Defaults are through-clutter loss near 900 MHz. A ray above the class height is not charged. Tree cover starts at 0.40 dB/m and built-up at 0.50 dB/m. Open land is near zero. Classes come from ESA WorldCover 2021.")
+                ForEach($store.clutterTable.classes) { $entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.name)
+                            .font(.body)
+                        Stepper(value: $entry.attenuationDbPerMeter, in: 0...2, step: 0.01) {
+                            Text(String(format: "%.2f dB/m", entry.attenuationDbPerMeter))
+                        }
+                        .accessibilityLabel("\(entry.name) attenuation")
+                        Stepper(value: $entry.heightM, in: 0...40, step: 0.5) {
+                            Text(String(format: "Height %.1f m", entry.heightM))
+                        }
+                        .accessibilityLabel("\(entry.name) height")
+                    }
+                }
+                Button("Reset Clutter Defaults") { store.resetClutterTable() }
+                    .frame(minHeight: 44)
+            }
+
+            Section("Engine comparison") {
+                Picker("Comparison", selection: $store.comparisonRecipe) {
+                    ForEach(EngineRecipe.allCases) { recipe in
+                        Text(recipe.title).tag(recipe)
+                    }
+                }
+                Stepper(value: $store.comparisonThresholdDb, in: 1...30, step: 1) {
+                    Text("Delta area threshold \(Int(store.comparisonThresholdDb.rounded())) dB")
+                }
+                Toggle("Show site overlay", isOn: $store.showPrimaryOverlay)
+                Toggle("Show comparison overlay", isOn: $store.showComparisonOverlay)
+                InspectorNote(text: "Compare from a site to run ITM, ITM + clutter, Simplified, or Simplified + multi-edge on the same coverage. The mean and maximum are the difference in dB. Hidden sites draw neither overlay.")
             }
 
             Section("ITM assumptions") {
@@ -75,9 +117,7 @@ struct SettingsView: View {
                 Stepper(value: $store.itmRefractivity, in: 250...400, step: 1) {
                     Text("Refractivity \(Int(store.itmRefractivity.rounded())) N")
                 }
-                Text("The default 50/50/50 broadcast case is a median prediction, in the spirit of an F(50,50) curve. ITM ignores buildings and trees. It is not a guarantee.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                InspectorNote(text: "The default 50/50/50 broadcast case is a median prediction, in the spirit of an F(50,50) curve. ITM itself ignores buildings and trees. Include clutter to add land-cover loss after that prediction. The confidence badge reads the variability percentages and how dense the elevation samples are. It is not a guarantee.")
             }
 
             Section("Map") {
@@ -97,11 +137,9 @@ struct SettingsView: View {
             }
 
             Section("Terrain cache") {
-                Button("Clear Cached Elevation", role: .destructive) { confirmClear = true }
+                Button("Clear Cached Terrain", role: .destructive) { confirmClear = true }
                     .frame(minHeight: 44)
-                Text("Sites stay on this device. Only downloaded elevation tiles are removed.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                InspectorNote(text: "Sites stay on this device. This removes downloaded elevation and land-cover tiles. The next run uses whatever is still cached, or warns when the finer data is missing.")
             }
 
             Section {
@@ -109,13 +147,16 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .confirmationDialog("Clear cached elevation?", isPresented: $confirmClear, titleVisibility: .visible) {
+        #if os(macOS)
+        .formStyle(.grouped)
+        #endif
+        .confirmationDialog("Clear cached terrain and land cover?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear Cache", role: .destructive) {
                 Task { await store.clearTerrainCache() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The next coverage run will download terrain again, or fall back to a free-space estimate while offline.")
+            Text("The next coverage run will download elevation and land cover again, or use whatever tiles are still on this device.")
         }
     }
 }

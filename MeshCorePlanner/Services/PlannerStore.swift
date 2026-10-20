@@ -85,6 +85,7 @@ final class PlannerStore {
     let container: ModelContainer
     private let modelContext: ModelContext
     let elevation: ElevationService
+    let landCover: LandCoverService
     private let injectedEngine: (any PropagationEngine)?
 
     var sites: [PlannedSite] = []
@@ -106,6 +107,10 @@ final class PlannerStore {
     var linkResult: LinkResult?
     var comparisonResult: LinkResult?
     var compareEngines = false
+    var comparisonCoverage: [UUID: CoverageGrid] = [:]
+    var comparisonStats: [UUID: CoverageComparison] = [:]
+    var comparisonRunningIDs: Set<UUID> = []
+    private var comparisonTasks: [UUID: Task<Void, Never>] = [:]
     var linkPair: (UUID, UUID)?
     var linkRunning = false
     var linkMessage: String?
@@ -206,12 +211,54 @@ final class PlannerStore {
         didSet { persist(itmRefractivity, SettingsKey.refractivity) }
     }
 
+    var includeClutter: Bool {
+        didSet { UserDefaults.standard.set(includeClutter, forKey: SettingsKey.clutter) }
+    }
+
+    var multiEdgeDiffraction: Bool {
+        didSet { UserDefaults.standard.set(multiEdgeDiffraction, forKey: SettingsKey.multiEdge) }
+    }
+
+    var elevationResolution: ElevationResolutionPreference {
+        didSet {
+            UserDefaults.standard.set(elevationResolution.rawValue, forKey: SettingsKey.elevationResolution)
+            let preference = elevationResolution
+            let service = elevation
+            Task { await service.setPreference(preference) }
+        }
+    }
+
+    var clutterTable: ClutterTable {
+        didSet {
+            if let data = try? JSONEncoder().encode(clutterTable) {
+                UserDefaults.standard.set(data, forKey: SettingsKey.clutterTable)
+            }
+        }
+    }
+
+    var comparisonRecipe: EngineRecipe {
+        didSet { UserDefaults.standard.set(comparisonRecipe.rawValue, forKey: SettingsKey.comparisonRecipe) }
+    }
+
+    var showPrimaryOverlay: Bool {
+        didSet { UserDefaults.standard.set(showPrimaryOverlay, forKey: SettingsKey.showPrimary) }
+    }
+
+    var showComparisonOverlay: Bool {
+        didSet { UserDefaults.standard.set(showComparisonOverlay, forKey: SettingsKey.showComparison) }
+    }
+
+    var comparisonThresholdDb: Double {
+        didSet { persist(comparisonThresholdDb, SettingsKey.comparisonThreshold) }
+    }
+
     private let locationClient = LocationClient()
 
-    init(modelContext: ModelContext, container: ModelContainer, elevation: ElevationService = ElevationService(), engine: (any PropagationEngine)? = nil) {
+    init(modelContext: ModelContext, container: ModelContainer, elevation: ElevationService = ElevationService(), landCover: LandCoverService = LandCoverService(), engine: (any PropagationEngine)? = nil) {
         self.modelContext = modelContext
         self.container = container
         self.elevation = elevation
+        self.landCover = landCover
         self.injectedEngine = engine
 
         let defaults = UserDefaults.standard
@@ -242,6 +289,20 @@ final class PlannerStore {
         itmDielectric = defaults.object(forKey: SettingsKey.dielectric) as? Double ?? 15
         itmConductivity = defaults.object(forKey: SettingsKey.conductivity) as? Double ?? 0.005
         itmRefractivity = defaults.object(forKey: SettingsKey.refractivity) as? Double ?? 301
+        includeClutter = defaults.object(forKey: SettingsKey.clutter) as? Bool ?? false
+        multiEdgeDiffraction = defaults.object(forKey: SettingsKey.multiEdge) as? Bool ?? false
+        elevationResolution = ElevationResolutionPreference(rawValue: defaults.string(forKey: SettingsKey.elevationResolution) ?? "") ?? .prefer30m
+        if let data = defaults.data(forKey: SettingsKey.clutterTable),
+           let saved = try? JSONDecoder().decode(ClutterTable.self, from: data),
+           !saved.classes.isEmpty {
+            clutterTable = saved.mergingMissingDefaults()
+        } else {
+            clutterTable = .meshCoreDefault
+        }
+        comparisonRecipe = EngineRecipe(rawValue: defaults.string(forKey: SettingsKey.comparisonRecipe) ?? "") ?? .simplified
+        showPrimaryOverlay = defaults.object(forKey: SettingsKey.showPrimary) as? Bool ?? true
+        showComparisonOverlay = defaults.object(forKey: SettingsKey.showComparison) as? Bool ?? false
+        comparisonThresholdDb = defaults.object(forKey: SettingsKey.comparisonThreshold) as? Double ?? 6
         mapCenter = Coordinate(latitude: latitude, longitude: longitude)
         latitudeDelta = spanLat
         longitudeDelta = spanLon
@@ -258,6 +319,8 @@ final class PlannerStore {
         locationClient.onAuthorizationChange = { [weak self] denied in
             self?.locationDenied = denied
         }
+        let preference = elevationResolution
+        Task { await elevation.setPreference(preference) }
         reload()
     }
 
@@ -272,8 +335,14 @@ final class PlannerStore {
         if statuses.contains(.unavailable) {
             return "No terrain data. Showing a free-space estimate."
         }
+        if visible.contains(where: { coverage[$0.id]?.resolutionReduced == true || comparisonCoverage[$0.id]?.resolutionReduced == true }) {
+            return "Some elevation is coarser than 30 m. Cached or zoom-11 terrain was used."
+        }
         if statuses.contains(.partial) {
             return "Some elevation is unavailable. Those samples ignore terrain."
+        }
+        if visible.contains(where: { coverage[$0.id]?.landCoverIncomplete == true || comparisonCoverage[$0.id]?.landCoverIncomplete == true }) {
+            return "Land cover is incomplete. Clutter was applied only where tiles were already cached."
         }
         return nil
     }
@@ -431,6 +500,8 @@ final class PlannerStore {
                               self.fingerprint(for: current) == fingerprint else { return }
                         self.coverage[id] = grid
                         self.coverageFingerprints[id] = fingerprint
+                        self.comparisonCoverage[id] = nil
+                        self.comparisonStats[id] = nil
                         self.progress[id] = nil
                         self.runningSiteIDs.remove(id)
                     }
@@ -449,8 +520,64 @@ final class PlannerStore {
     func cancelCoverage(for id: UUID) {
         coverageTasks[id]?.cancel()
         coverageTasks[id] = nil
+        comparisonTasks[id]?.cancel()
+        comparisonTasks[id] = nil
         progress[id] = nil
         runningSiteIDs.remove(id)
+        comparisonRunningIDs.remove(id)
+    }
+
+    func compareCoverage(for site: PlannedSite) {
+        guard coverage[site.id] != nil else {
+            simulationMessage = "Estimate coverage first, then compare a second engine."
+            return
+        }
+        if let error = site.validationError() {
+            simulationMessage = error.localizedDescription
+            return
+        }
+        simulationMessage = nil
+        let id = site.id
+        let primaryFingerprint = fingerprint(for: site)
+        let request = coverageRequest(for: site)
+        let engine = comparisonEngine()
+        let elevation = self.elevation
+        let threshold = comparisonThresholdDb
+        comparisonTasks[id]?.cancel()
+        comparisonRunningIDs.insert(id)
+        progress[id] = 0
+        comparisonTasks[id] = Task {
+            let stream = engine.coverage(request, elevation: elevation)
+            do {
+                for try await update in stream {
+                    if Task.isCancelled { return }
+                    switch update {
+                    case .progress(let fraction):
+                        self.progress[id] = fraction
+                    case .finished(let grid):
+                        guard let current = self.sites.first(where: { $0.id == id }),
+                              self.fingerprint(for: current) == primaryFingerprint,
+                              let primary = self.coverage[id] else { return }
+                        self.comparisonCoverage[id] = grid
+                        self.comparisonStats[id] = CoverageComparisonMath.compare(
+                            primary: primary,
+                            secondary: grid,
+                            thresholdDb: threshold
+                        )
+                        self.showComparisonOverlay = true
+                        self.progress[id] = nil
+                        self.comparisonRunningIDs.remove(id)
+                    }
+                }
+            } catch is CancellationError {
+                self.progress[id] = nil
+                self.comparisonRunningIDs.remove(id)
+            } catch {
+                self.progress[id] = nil
+                self.comparisonRunningIDs.remove(id)
+                self.simulationMessage = error.localizedDescription
+            }
+        }
     }
 
     func analyzeLink(from: PlannedSite, to: PlannedSite) async {
@@ -465,7 +592,7 @@ final class PlannerStore {
         defer { linkRunning = false }
         let request = LinkRequest(from: from.radioEndpoint(), to: to.radioEndpoint(), sensitivityDbm: receiverSensitivityDbm)
         let primary = selectedEngine()
-        let secondary = compareEngines ? alternateEngine() : nil
+        let secondary = compareEngines ? comparisonEngine() : nil
         do {
             let result = try await primary.link(request, elevation: elevation)
             linkResult = result
@@ -637,6 +764,11 @@ final class PlannerStore {
 
     func clearTerrainCache() async {
         await elevation.clearCache()
+        await landCover.clearCache()
+    }
+
+    func resetClutterTable() {
+        clutterTable = .meshCoreDefault
     }
 
     func noteRegion(_ region: MKCoordinateRegion) {
@@ -685,7 +817,11 @@ final class PlannerStore {
             String(format: "%.0f", itmSituationPercent),
             String(format: "%.2f", itmDielectric),
             String(format: "%.4f", itmConductivity),
-            String(format: "%.0f", itmRefractivity)
+            String(format: "%.0f", itmRefractivity),
+            includeClutter ? "clutter" : "noclutter",
+            includeClutter ? clutterTable.fingerprint() : "-",
+            propagationModel == .simplified && multiEdgeDiffraction ? "multi" : "single",
+            elevationResolution.rawValue
         ].joined(separator: "|")
     }
 
@@ -728,22 +864,37 @@ final class PlannerStore {
         )
     }
 
-    private func makeEngine(_ model: PropagationModel) -> any PropagationEngine {
+    private func makeEngine(model: PropagationModel, clutter: Bool, multiEdge: Bool) -> any PropagationEngine {
+        let options = SimulationOptions(
+            includeClutter: clutter,
+            clutterTable: clutterTable,
+            multiEdgeDiffraction: multiEdge && model == .simplified,
+            adaptiveSampling: elevationResolution == .prefer30m,
+            landCover: clutter ? landCover : nil
+        )
         switch model {
         case .itm:
-            ITMPropagationEngine(parameters: currentITMParameters(), sampleSpacingM: simulationQuality.sampleSpacingM)
+            return ITMPropagationEngine(
+                parameters: currentITMParameters(),
+                sampleSpacingM: simulationQuality.sampleSpacingM,
+                options: options
+            )
         case .simplified:
-            SimplifiedTerrainEngine()
+            return SimplifiedTerrainEngine(options: options)
         }
     }
 
     private func selectedEngine() -> any PropagationEngine {
         if let injectedEngine { return injectedEngine }
-        return makeEngine(propagationModel)
+        return makeEngine(model: propagationModel, clutter: includeClutter, multiEdge: multiEdgeDiffraction)
     }
 
-    private func alternateEngine() -> any PropagationEngine {
-        makeEngine(propagationModel == .itm ? .simplified : .itm)
+    private func comparisonEngine() -> any PropagationEngine {
+        makeEngine(
+            model: comparisonRecipe.model,
+            clutter: comparisonRecipe.includeClutter,
+            multiEdge: comparisonRecipe.multiEdge
+        )
     }
 
     private func scheduleSettingsRefresh() {
@@ -842,4 +993,12 @@ private enum SettingsKey {
     static let dielectric = "itmDielectric"
     static let conductivity = "itmConductivity"
     static let refractivity = "itmRefractivity"
+    static let clutter = "includeClutter"
+    static let multiEdge = "multiEdgeDiffraction"
+    static let elevationResolution = "elevationResolution"
+    static let clutterTable = "clutterTable"
+    static let comparisonRecipe = "comparisonRecipe"
+    static let showPrimary = "showPrimaryOverlay"
+    static let showComparison = "showComparisonOverlay"
+    static let comparisonThreshold = "comparisonThresholdDb"
 }

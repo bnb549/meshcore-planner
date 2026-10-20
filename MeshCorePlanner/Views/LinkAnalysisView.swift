@@ -5,6 +5,7 @@ struct LinkAnalysisView: View {
     var site: PlannedSite
     @Bindable var store: PlannerStore
     @State private var otherID: UUID?
+    @State private var showFresnelZone = true
 
     var body: some View {
         let others = store.sites.filter { $0.id != site.id }
@@ -19,7 +20,14 @@ struct LinkAnalysisView: View {
             }
             if let other = others.first(where: { $0.id == otherID }) {
                 Toggle("Compare engines", isOn: $store.compareEngines)
-                    .accessibilityHint("Shows the other propagation model beside the selected one.")
+                    .accessibilityHint("Runs the comparison engine beside the selected one.")
+                if store.compareEngines {
+                    Picker("Comparison", selection: $store.comparisonRecipe) {
+                        ForEach(EngineRecipe.allCases) { recipe in
+                            Text(recipe.title).tag(recipe)
+                        }
+                    }
+                }
                 Button(store.linkRunning ? "Analyzing…" : "Analyze Link") {
                     Task { await store.analyzeLink(from: site, to: other) }
                 }
@@ -64,23 +72,36 @@ struct LinkAnalysisView: View {
         InspectorFact(title: "Weakest margin", value: FieldFormat.decibels(result.weakestMarginDb))
         if store.compareEngines, let comparison = store.comparisonResult {
             InspectorFact(title: "\(comparison.engineName) margin", value: FieldFormat.decibels(comparison.weakestMarginDb))
+            let delta = result.weakestMarginDb - comparison.weakestMarginDb
+            InspectorFact(title: "Margin delta", value: String(format: "%+.1f dB", delta))
             InspectorNote(text: comparison.modelNote)
         }
+        if let confidence = result.confidence {
+            InspectorFact(title: "Confidence", value: confidence.title)
+        }
+        InspectorFact(title: "Fresnel clearance", value: PropagationMath.fresnelClearanceLabel(profile: result.profile))
         InspectorFact(
-            title: "Fresnel clearance",
+            title: "60% of F1",
             value: result.forward.fresnelClear
-                ? String(format: "%.0f%% of F1", result.forward.fresnelClearanceRatio * 100)
-                : String(format: "Blocked (%.0f%% of F1)", result.forward.fresnelClearanceRatio * 100)
+                ? String(format: "%.0f%% clear", result.forward.fresnelClearanceRatio * 100)
+                : String(format: "Blocked (%.0f%%)", result.forward.fresnelClearanceRatio * 100)
         )
+        InspectorNote(text: "Positive clearance means terrain is below the first Fresnel zone. Negative means the zone is obstructed. Green is clear, yellow is partial, red is blocked.")
+        if let clutterSummary = result.clutterSummary {
+            InspectorNote(text: clutterSummary)
+        }
+        if let dataNote = result.dataNote {
+            InspectorNote(text: dataNote)
+        }
         if !result.modelNote.isEmpty {
             InspectorNote(text: result.modelNote)
         }
         if !result.profile.isEmpty {
-            TerrainProfileChart(samples: result.profile)
+            Toggle("Fresnel zone", isOn: $showFresnelZone)
+                .accessibilityHint("Draws the first Fresnel zone and the 60 percent boundary on the profile.")
+            TerrainProfileChart(samples: result.profile, showsFresnelZone: showFresnelZone)
                 .frame(height: 180)
-                .accessibilityLabel(result.forward.fresnelClear
-                    ? "Terrain profile, first Fresnel zone is at least 60 percent clear"
-                    : "Terrain profile, first Fresnel zone is obstructed")
+                .accessibilityLabel(PropagationMath.fresnelClearanceLabel(profile: result.profile))
         }
     }
 
@@ -111,6 +132,7 @@ struct LinkAnalysisView: View {
 
 struct TerrainProfileChart: View {
     var samples: [ProfileSample]
+    var showsFresnelZone: Bool
 
     var body: some View {
         Chart {
@@ -119,7 +141,15 @@ struct TerrainProfileChart: View {
                     x: .value("Distance", sample.distanceM / 1_000),
                     y: .value("Meters", sample.terrainWithBulge)
                 )
-                .foregroundStyle(Color.brown.opacity(0.45))
+                .foregroundStyle(Color.brown.opacity(0.35))
+            }
+            ForEach(samples) { sample in
+                PointMark(
+                    x: .value("Distance", sample.distanceM / 1_000),
+                    y: .value("Meters", sample.terrainWithBulge)
+                )
+                .foregroundStyle(fresnelColor(sample.fresnelBand))
+                .symbolSize(28)
             }
             ForEach(samples) { sample in
                 LineMark(
@@ -129,27 +159,37 @@ struct TerrainProfileChart: View {
                 )
                 .foregroundStyle(Color.blue)
             }
-            ForEach(samples) { sample in
-                LineMark(
-                    x: .value("Distance", sample.distanceM / 1_000),
-                    y: .value("Meters", sample.fresnel1AMSL),
-                    series: .value("Series", "First Fresnel")
-                )
-                .foregroundStyle(Color.orange.opacity(0.7))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
-            }
-            ForEach(samples) { sample in
-                LineMark(
-                    x: .value("Distance", sample.distanceM / 1_000),
-                    y: .value("Meters", sample.fresnel60AMSL),
-                    series: .value("Series", "60% Fresnel")
-                )
-                .foregroundStyle(Color.orange)
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            if showsFresnelZone {
+                ForEach(samples) { sample in
+                    LineMark(
+                        x: .value("Distance", sample.distanceM / 1_000),
+                        y: .value("Meters", sample.fresnel1AMSL),
+                        series: .value("Series", "First Fresnel")
+                    )
+                    .foregroundStyle(Color.orange.opacity(0.7))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                }
+                ForEach(samples) { sample in
+                    LineMark(
+                        x: .value("Distance", sample.distanceM / 1_000),
+                        y: .value("Meters", sample.fresnel60AMSL),
+                        series: .value("Series", "60% Fresnel")
+                    )
+                    .foregroundStyle(Color.orange)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                }
             }
         }
         .chartXAxisLabel("km")
         .chartYAxisLabel("m")
         .chartLegend(position: .bottom)
+    }
+
+    private func fresnelColor(_ band: FresnelBand) -> Color {
+        switch band {
+        case .clear: .green
+        case .partial: .yellow
+        case .blocked: .red
+        }
     }
 }

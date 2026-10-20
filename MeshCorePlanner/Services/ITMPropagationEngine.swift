@@ -237,10 +237,16 @@ nonisolated enum ITMBridge {
 nonisolated struct ITMPropagationEngine: PropagationEngine {
     var parameters: ITMParameters
     var sampleSpacingM: Double
+    var options: SimulationOptions
 
-    init(parameters: ITMParameters = .meshCoreDefault, sampleSpacingM: Double = SimulationQuality.standard.sampleSpacingM) {
+    init(
+        parameters: ITMParameters = .meshCoreDefault,
+        sampleSpacingM: Double = SimulationQuality.standard.sampleSpacingM,
+        options: SimulationOptions = SimulationOptions()
+    ) {
         self.parameters = parameters
         self.sampleSpacingM = sampleSpacingM
+        self.options = options
     }
 
     func freeSpacePathLossDb(distanceM: Double, frequencyMHz: Double) -> Double {
@@ -252,8 +258,9 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
         try PropagationMath.validate(endpoint: request.to)
         let sampled = try await sampleLink(request, elevation: elevation)
         let parameters = self.parameters
+        let options = self.options
         return await Task.detached {
-            Self.assembleLink(request, sampled: sampled, parameters: parameters)
+            Self.assembleLink(request, sampled: sampled, parameters: parameters, options: options)
         }.value
     }
 
@@ -262,10 +269,11 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
         elevation: any ElevationProviding
     ) -> AsyncThrowingStream<CoverageUpdate, Error> {
         let parameters = self.parameters
+        let options = self.options
         return AsyncThrowingStream { continuation in
             let task = Task.detached {
                 do {
-                    let grid = try await Self.compute(request, parameters: parameters, elevation: elevation) { fraction in
+                    let grid = try await Self.compute(request, parameters: parameters, options: options, elevation: elevation) { fraction in
                         continuation.yield(.progress(fraction))
                     }
                     continuation.yield(.finished(grid))
@@ -285,24 +293,59 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
         let end = request.to.coordinate
         let distance = max(GeoMath.distanceM(from: start, to: end), 1)
         let bearing = GeoMath.bearingDeg(from: start, to: end)
-        let distances = PropagationMath.sampleDistances(total: distance, spacing: sampleSpacingM, maxCount: 700)
+        var distances = PropagationMath.sampleDistances(total: distance, spacing: sampleSpacingM, maxCount: 700)
+        if options.adaptiveSampling {
+            let coarseCoordinates = distances.map { sample -> Coordinate in
+                if sample <= 0 { return start }
+                if abs(sample - distance) < 0.5 { return end }
+                return GeoMath.destination(from: start, bearingDeg: bearing, distanceM: sample)
+            }
+            let coarseBatch = try await elevation.elevations(at: coarseCoordinates)
+            let coarsePoints = zip(distances, coarseBatch.samples).map { sampleDistance, sample in
+                PathPoint(distanceM: sampleDistance, elevationM: sample.elevationM)
+            }
+            distances = PropagationMath.adaptiveSampleDistances(
+                total: distance,
+                coarse: coarsePoints,
+                spacing: sampleSpacingM,
+                maxCount: 700
+            )
+        }
         let coordinates = distances.map { sample -> Coordinate in
             if sample <= 0 { return start }
             if abs(sample - distance) < 0.5 { return end }
             return GeoMath.destination(from: start, bearingDeg: bearing, distanceM: sample)
         }
         let batch = try await elevation.elevations(at: coordinates)
+        var points = zip(distances, batch.samples).map { sampleDistance, sample in
+            PathPoint(distanceM: sampleDistance, elevationM: sample.elevationM)
+        }
+        var landCoverIncomplete = false
+        if options.includeClutter, let landCover = options.landCover {
+            let cover = try await landCover.classes(at: coordinates)
+            for index in points.indices where index < cover.codes.count {
+                points[index].landCoverCode = cover.codes[index]
+            }
+            landCoverIncomplete = cover.status == .unavailable || cover.status == .partial
+        }
         return SampledPath(
             distanceM: distance,
             bearingFromToDeg: bearing,
             bearingToFromDeg: GeoMath.bearingDeg(from: end, to: start),
-            points: zip(distances, batch.samples).map { distance, sample in
-                PathPoint(distanceM: distance, elevationM: sample.elevationM)
-            }
+            points: points,
+            elevationStatus: batch.status,
+            resolutionReduced: batch.resolutionReduced,
+            resolutionNote: batch.resolutionNote,
+            landCoverIncomplete: landCoverIncomplete
         )
     }
 
-    private static func assembleLink(_ request: LinkRequest, sampled: SampledPath, parameters: ITMParameters) -> LinkResult {
+    private static func assembleLink(
+        _ request: LinkRequest,
+        sampled: SampledPath,
+        parameters: ITMParameters,
+        options: SimulationOptions
+    ) -> LinkResult {
         let forwardGeo = PropagationMath.propagationLoss(
             points: sampled.points,
             txAntennaHeightM: request.from.antennaHeightM,
@@ -332,12 +375,22 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
             parameters: parameters
         )
         let usedFallback = forwardITM == nil || reverseITM == nil
-        let forwardLoss = forwardITM?.lossDb ?? forwardGeo.pathLossDb
-        let reverseLoss = reverseITM?.lossDb ?? reverseGeo.pathLossDb
+        let forwardClutter = itmClutter(points: sampled.points, txHeight: request.from.antennaHeightM, rxHeight: request.to.antennaHeightM, frequency: request.from.frequencyMHz, options: options)
+        let reverseClutter = itmClutter(points: PropagationMath.reversed(sampled.points), txHeight: request.to.antennaHeightM, rxHeight: request.from.antennaHeightM, frequency: request.to.frequencyMHz, options: options)
+        let forwardLoss = (forwardITM?.lossDb ?? forwardGeo.pathLossDb) + forwardClutter.lossDb
+        let reverseLoss = (reverseITM?.lossDb ?? reverseGeo.pathLossDb) + reverseClutter.lossDb
         let mode = forwardITM?.modeTitle ?? "simplified"
-        let note = usedFallback
-            ? "Terrain was missing or ITM rejected the path, so this result uses the simplified model."
-            : "ITM (Longley-Rice), \(mode), \(parameters.variability.title.lowercased()), \(Int(parameters.timePercent))/\(Int(parameters.locationPercent))/\(Int(parameters.situationPercent)). A prediction, not a measurement. Trees and buildings are ignored."
+        let clutterSummary = forwardClutter.lossDb >= reverseClutter.lossDb ? forwardClutter.summary : reverseClutter.summary
+        let note = itmNote(parameters: parameters, mode: mode, fallback: usedFallback, clutter: options.includeClutter, clutterSummary: clutterSummary)
+        let incomplete = options.includeClutter && (forwardClutter.incomplete || reverseClutter.incomplete || sampled.landCoverIncomplete)
+        let confidence = usedFallback ? nil : PlanningConfidence.itm(
+            sampleSpacingM: sampled.distanceM / Double(max(sampled.points.count - 1, 1)),
+            timePercent: parameters.timePercent,
+            locationPercent: parameters.locationPercent,
+            situationPercent: parameters.situationPercent,
+            elevationStatus: sampled.elevationStatus,
+            resolutionReduced: sampled.resolutionReduced
+        )
         return LinkResult(
             distanceM: sampled.distanceM,
             bearingFromToDeg: sampled.bearingFromToDeg,
@@ -346,14 +399,19 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
             reverse: directional(tx: request.to, rx: request.from, breakdown: reverseGeo, pathLossDb: reverseLoss, sensitivity: request.sensitivityDbm),
             profile: forwardGeo.profile,
             usedFreeSpaceFallback: usedFallback || forwardGeo.usedFreeSpaceFallback && forwardITM == nil,
-            engineName: usedFallback ? "Simplified" : "ITM (Longley-Rice)",
-            modelNote: note
+            engineName: EngineTitle.name(model: .itm, clutter: options.includeClutter, multiEdge: false, fallback: usedFallback),
+            modelNote: note,
+            clutterLossDb: max(forwardClutter.lossDb, reverseClutter.lossDb),
+            clutterSummary: options.includeClutter ? clutterSummary : nil,
+            confidence: confidence,
+            dataNote: joinedDataNote(reduced: sampled.resolutionReduced, resolutionNote: sampled.resolutionNote, landCoverIncomplete: incomplete)
         )
     }
 
     private static func compute(
         _ request: CoverageRequest,
         parameters: ITMParameters,
+        options: SimulationOptions,
         elevation: any ElevationProviding,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> CoverageGrid {
@@ -378,13 +436,25 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
         var sawCache = false
         var itmCells = 0
         var cellID = 0
+        var resolutionReduced = false
+        var resolutionNote: String?
+        var landCoverIncomplete = false
+        var clutterSummary: String?
 
         for radial in 0..<radials {
             try Task.checkCancellation()
             let startBearing = Double(radial) / Double(radials) * 360
             let endBearing = Double(radial + 1) / Double(radials) * 360
             let centerBearing = (startBearing + endBearing) / 2
-            let distances = PropagationMath.sampleDistances(total: maxRange, spacing: spacing, maxCount: 700)
+            var distances = PropagationMath.sampleDistances(total: maxRange, spacing: spacing, maxCount: 700)
+            if options.adaptiveSampling {
+                let coarseCoordinates = distances.map { distance -> Coordinate in
+                    distance <= 0 ? origin : GeoMath.destination(from: origin, bearingDeg: centerBearing, distanceM: distance)
+                }
+                let coarseBatch = try await elevation.elevations(at: coarseCoordinates)
+                let coarsePoints = zip(distances, coarseBatch.samples).map { PathPoint(distanceM: $0.0, elevationM: $0.1.elevationM) }
+                distances = PropagationMath.adaptiveSampleDistances(total: maxRange, coarse: coarsePoints, spacing: spacing, maxCount: 700)
+            }
             let coordinates = distances.map { distance -> Coordinate in
                 distance <= 0
                     ? origin
@@ -400,10 +470,21 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
             case .unavailable:
                 sawMissing = true
             }
+            if batch.resolutionReduced {
+                resolutionReduced = true
+                resolutionNote = batch.resolutionNote
+            }
             if batch.samples.contains(where: { $0.elevationM != nil }) { sawValue = true }
             if batch.samples.contains(where: { $0.elevationM == nil }) { sawMissing = true }
-            let points = zip(distances, batch.samples).map { distance, sample in
+            var points = zip(distances, batch.samples).map { distance, sample in
                 PathPoint(distanceM: distance, elevationM: sample.elevationM)
+            }
+            if options.includeClutter, let landCover = options.landCover {
+                let cover = try await landCover.classes(at: coordinates)
+                for index in points.indices where index < cover.codes.count {
+                    points[index].landCoverCode = cover.codes[index]
+                }
+                if cover.status == .unavailable || cover.status == .partial { landCoverIncomplete = true }
             }
 
             for ring in 0..<rings {
@@ -430,7 +511,16 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
                 } else {
                     itmCells += 1
                 }
-                let pathLoss = itm?.lossDb ?? geometric.pathLossDb
+                let clutterLoss = itmClutter(
+                    points: prefix,
+                    txHeight: request.transmitter.antennaHeightM,
+                    rxHeight: request.receiverHeightM,
+                    frequency: request.transmitter.frequencyMHz,
+                    options: options
+                )
+                if clutterLoss.incomplete { landCoverIncomplete = true }
+                if clutterSummary == nil, clutterLoss.lossDb > 0 { clutterSummary = clutterLoss.summary }
+                let pathLoss = (itm?.lossDb ?? geometric.pathLossDb) + clutterLoss.lossDb
                 let rssi = PropagationMath.receivedPowerDbm(
                     txPowerDbm: request.transmitter.txPowerDbm,
                     txGainDbi: request.transmitter.antennaGainDbi,
@@ -473,12 +563,25 @@ nonisolated struct ITMPropagationEngine: PropagationEngine {
         } else {
             status = .cache
         }
+        let fallback = itmCells == 0
         return CoverageGrid(
             cells: cells,
             maxRangeM: maxRange,
             elevationStatus: status,
-            usedFreeSpaceFallback: itmCells == 0,
-            engineName: itmCells > 0 ? "ITM (Longley-Rice)" : "Simplified"
+            usedFreeSpaceFallback: fallback,
+            engineName: EngineTitle.name(model: .itm, clutter: options.includeClutter, multiEdge: false, fallback: fallback),
+            resolutionReduced: resolutionReduced,
+            landCoverIncomplete: landCoverIncomplete,
+            confidence: fallback ? nil : PlanningConfidence.itm(
+                sampleSpacingM: spacing,
+                timePercent: parameters.timePercent,
+                locationPercent: parameters.locationPercent,
+                situationPercent: parameters.situationPercent,
+                elevationStatus: status,
+                resolutionReduced: resolutionReduced
+            ),
+            clutterSummary: options.includeClutter ? clutterSummary : nil,
+            dataNote: joinedDataNote(reduced: resolutionReduced, resolutionNote: resolutionNote, landCoverIncomplete: landCoverIncomplete)
         )
     }
 }
@@ -488,6 +591,48 @@ private nonisolated struct SampledPath: Sendable {
     var bearingFromToDeg: Double
     var bearingToFromDeg: Double
     var points: [PathPoint]
+    var elevationStatus: ElevationStatus
+    var resolutionReduced: Bool
+    var resolutionNote: String?
+    var landCoverIncomplete: Bool
+}
+
+private nonisolated func itmClutter(
+    points: [PathPoint],
+    txHeight: Double,
+    rxHeight: Double,
+    frequency: Double,
+    options: SimulationOptions
+) -> ClutterLossResult {
+    guard options.includeClutter else { return .none }
+    return ClutterMath.loss(
+        points: points,
+        txAntennaHeightM: txHeight,
+        rxAntennaHeightM: rxHeight,
+        frequencyMHz: frequency,
+        table: options.clutterTable
+    )
+}
+
+private nonisolated func itmNote(
+    parameters: ITMParameters,
+    mode: String,
+    fallback: Bool,
+    clutter: Bool,
+    clutterSummary: String
+) -> String {
+    if fallback {
+        var text = "Terrain was missing or ITM rejected the path, so this result uses the simplified model."
+        if clutter { text += " \(clutterSummary)" }
+        return text
+    }
+    var text = "ITM (Longley-Rice), \(mode), \(parameters.variability.title.lowercased()), \(Int(parameters.timePercent))/\(Int(parameters.locationPercent))/\(Int(parameters.situationPercent)). A prediction, not a measurement."
+    if clutter {
+        text += " \(clutterSummary)"
+    } else {
+        text += " Trees and buildings are ignored."
+    }
+    return text
 }
 
 private nonisolated func prefixPoints(_ points: [PathPoint], through distance: Double) -> [PathPoint] {
@@ -496,9 +641,12 @@ private nonisolated func prefixPoints(_ points: [PathPoint], through distance: D
     if abs(last.distanceM - distance) < 0.5 || kept.count < 2 {
         if kept.count >= 2 { return kept }
         let nearest = points.min { abs($0.distanceM - distance) < abs($1.distanceM - distance) }
-        return [PathPoint(distanceM: 0, elevationM: points.first?.elevationM), PathPoint(distanceM: distance, elevationM: nearest?.elevationM)]
+        return [
+            PathPoint(distanceM: 0, elevationM: points.first?.elevationM, landCoverCode: points.first?.landCoverCode),
+            PathPoint(distanceM: distance, elevationM: nearest?.elevationM, landCoverCode: nearest?.landCoverCode)
+        ]
     }
-    return kept + [PathPoint(distanceM: distance, elevationM: last.elevationM)]
+    return kept + [PathPoint(distanceM: distance, elevationM: last.elevationM, landCoverCode: last.landCoverCode)]
 }
 
 private nonisolated func filledGround(_ points: [PathPoint]) -> [Double]? {

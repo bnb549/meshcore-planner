@@ -10,8 +10,8 @@ Build number source of truth: Xcode `CURRENT_PROJECT_VERSION` (integer, monotoni
 
 ## Current
 
-- Marketing: 0.2.0
-- Build: 2
+- Marketing: 0.3.0
+- Build: 3
 - Channel: local
 - Date: 2026-10-19
 - Git: main
@@ -41,3 +41,14 @@ Build number source of truth: Xcode `CURRENT_PROJECT_VERSION` (integer, monotoni
 - ITM defaults: continental temperate climate, vertical polarization, dielectric 15, conductivity 0.005 S/m, surface refractivity 301, broadcast variability, 50/50/50. That is a median planning prediction in the spirit of F(50,50), not a measurement. Trees and buildings are ignored.
 - Known limits: No ITWOM clutter model, no building or tree database, no live radio, and no cloud sync. PlannedSite records and the per-site visibility toggle are unchanged.
 - Files introduced: ITMPropagationEngine, ITMBridge, and the public-domain NTIA ITS ITM 1.3 sources under ThirdParty/ITM.
+
+### 0.3.0 — 2026-10-19 — build 3
+
+- Added optional ESA WorldCover land-cover clutter. Class attenuation is editable in Settings and is added after ITM or Simplified. Include clutter is off unless the user turns it on, and that restores the 0.2.0 loss.
+- Elevation prefers about 30 m terrarium tiles when they exist and falls back to the existing zoom-11 tiles. Offline runs use the cache and say when the resolution was reduced. Paths sample more tightly near the transmitter and near terrain peaks.
+- Point-to-point profiles show first-Fresnel clearance in meters. Positive is clear and negative is obstructed, with green, yellow, and red on the profile. The Fresnel zone overlay can be hidden.
+- Simplified can sum knife edges across more than one ridge. The single-edge path stays the default. The multi-edge path is an Epstein-Peterson approximation, not ITWOM or a parabolic-equation solver.
+- A site can compare ITM, ITM + clutter, Simplified, and Simplified + multi-edge. The inspector shows mean delta, maximum delta, and the area where the two differ by more than a chosen number of dB. The two overlays toggle separately and still follow the site visibility flag.
+- ITM runs show a High / Medium / Low confidence badge from the variability percentages and the elevation sample spacing.
+- Known limits: No ITWOM, no building footprints, no LiDAR, and no live radio. PlannedSite records and the per-site visibility toggle are unchanged.
+- Files introduced: LandCoverService and the clutter attenuation table. ElevationService, both propagation engines, the profile chart, and the comparison section were extended.

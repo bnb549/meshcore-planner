@@ -131,6 +131,20 @@ nonisolated struct CoverageRequest: Sendable {
 
 // MARK: - Results
 
+nonisolated enum FresnelBand: Sendable, Equatable {
+    case clear
+    case partial
+    case blocked
+
+    var title: String {
+        switch self {
+        case .clear: "Clear"
+        case .partial: "Partial"
+        case .blocked: "Obstructed"
+        }
+    }
+}
+
 nonisolated struct ProfileSample: Sendable, Identifiable {
     var id: Int
     var distanceM: Double
@@ -140,6 +154,16 @@ nonisolated struct ProfileSample: Sendable, Identifiable {
     var fresnel60AMSL: Double
     var fresnel1AMSL: Double
     var protrusionM: Double
+
+    /// Distance from the terrain to the bottom of the first Fresnel zone.
+    /// Positive means the zone is clear. Negative means terrain enters the zone.
+    var fresnelClearanceM: Double { fresnel1AMSL - terrainWithBulge }
+
+    var fresnelBand: FresnelBand {
+        if fresnelClearanceM >= -0.05 { return .clear }
+        if terrainWithBulge <= fresnel60AMSL + 0.05 { return .partial }
+        return .blocked
+    }
 }
 
 nonisolated struct DirectionalLink: Sendable {
@@ -163,6 +187,10 @@ nonisolated struct LinkResult: Sendable {
     var usedFreeSpaceFallback: Bool
     var engineName: String
     var modelNote: String
+    var clutterLossDb: Double = 0
+    var clutterSummary: String? = nil
+    var confidence: PlanningConfidence? = nil
+    var dataNote: String? = nil
 
     var weakestMarginDb: Double { min(forward.marginDb, reverse.marginDb) }
 }
@@ -191,6 +219,11 @@ nonisolated struct CoverageGrid: Sendable {
     var elevationStatus: ElevationStatus
     var usedFreeSpaceFallback: Bool
     var engineName: String = "Simplified"
+    var resolutionReduced: Bool = false
+    var landCoverIncomplete: Bool = false
+    var confidence: PlanningConfidence? = nil
+    var clutterSummary: String? = nil
+    var dataNote: String? = nil
 
     var diskAreaM2: Double { .pi * maxRangeM * maxRangeM }
 
@@ -216,6 +249,7 @@ nonisolated enum CoverageUpdate: Sendable {
 nonisolated struct PathPoint: Sendable {
     var distanceM: Double
     var elevationM: Double?
+    var landCoverCode: Int? = nil
 }
 
 nonisolated struct LossBreakdown: Sendable {
@@ -243,6 +277,8 @@ nonisolated enum ElevationStatus: Sendable, Equatable {
 nonisolated struct ElevationBatch: Sendable {
     var samples: [ElevationSample]
     var status: ElevationStatus
+    var resolutionReduced: Bool = false
+    var resolutionNote: String? = nil
 }
 
 nonisolated protocol ElevationProviding: Sendable {
@@ -257,6 +293,13 @@ nonisolated protocol PropagationEngine: Sendable {
 
 // MARK: - Math
 
+nonisolated enum DiffractionMode: Sendable {
+    /// One knife edge at the worst sample, and only when that sample crosses the line of sight.
+    case dominantEdge
+    /// Epstein-Peterson sum of knife edges at successive obstructions.
+    case multiEdge
+}
+
 /// Original planning formulas. Not derived from SPLAT! or ITM source.
 nonisolated enum PropagationMath {
     static let kFactor = 4.0 / 3.0
@@ -268,6 +311,14 @@ nonisolated enum PropagationMath {
 
     static func wavelengthM(frequencyMHz: Double) -> Double {
         299.792458 / frequencyMHz
+    }
+
+    /// First Fresnel zone radius. r = sqrt(λ · d1 · d2 / (d1 + d2)).
+    static func firstFresnelRadiusM(distance1M: Double, distance2M: Double, frequencyMHz: Double) -> Double {
+        let total = distance1M + distance2M
+        guard distance1M > 0, distance2M > 0, frequencyMHz > 0, total > 0 else { return 0 }
+        let lambda = wavelengthM(frequencyMHz: frequencyMHz)
+        return sqrt(lambda * distance1M * distance2M / total)
     }
 
     static func twoRayLossDb(distanceM: Double, txHeightM: Double, rxHeightM: Double) -> Double {
@@ -331,19 +382,100 @@ nonisolated enum PropagationMath {
 
     static func reversed(_ points: [PathPoint]) -> [PathPoint] {
         guard let total = points.last?.distanceM else { return points }
-        return points.reversed().map { PathPoint(distanceM: total - $0.distanceM, elevationM: $0.elevationM) }
+        return points.reversed().map {
+            PathPoint(distanceM: total - $0.distanceM, elevationM: $0.elevationM, landCoverCode: $0.landCoverCode)
+        }
+    }
+
+    /// Denser samples in the first 15% of the path and around terrain peaks. Coarser elsewhere.
+    /// `sampleDistances` is unchanged. Callers opt into this when a finer profile is useful.
+    static func adaptiveSampleDistances(
+        total: Double,
+        coarse: [PathPoint],
+        spacing: Double,
+        maxCount: Int
+    ) -> [Double] {
+        let safe = max(total, 1)
+        let step = max(spacing, 1)
+        let fine = max(step / 3, 1)
+        let nearLimit = safe * 0.15
+        var raw: [Double] = [0, safe]
+        var cursor = fine
+        while cursor < nearLimit {
+            raw.append(cursor)
+            cursor += fine
+        }
+        if nearLimit > 0, nearLimit < safe { raw.append(nearLimit) }
+        cursor = nearLimit + step
+        while cursor < safe {
+            raw.append(cursor)
+            cursor += step
+        }
+        var peakDistances: [Double] = []
+        if coarse.count >= 3 {
+            for index in 1..<(coarse.count - 1) {
+                guard let mid = coarse[index].elevationM,
+                      let left = coarse[index - 1].elevationM,
+                      let right = coarse[index + 1].elevationM,
+                      mid + 0.01 >= left, mid + 0.01 >= right,
+                      mid >= left + 8 || mid >= right + 8 else { continue }
+                let peak = min(safe, max(0, coarse[index].distanceM))
+                peakDistances.append(peak)
+                raw.append(peak)
+                raw.append(max(0, peak - step / 4))
+                raw.append(min(safe, peak + step / 4))
+            }
+        }
+        var unique = Array(Set(raw.map { ($0 * 2).rounded() / 2 })).sorted()
+        if unique.first != 0 { unique.insert(0, at: 0) }
+        if let last = unique.last, abs(last - safe) > 0.5 {
+            unique.append(safe)
+        } else if let last = unique.indices.last, abs(unique[last] - safe) <= 0.5 {
+            unique[last] = safe
+        }
+        let limit = max(maxCount, 2)
+        guard unique.count > limit else { return unique }
+        func isProtected(_ distance: Double) -> Bool {
+            if distance <= 0.5 || abs(distance - safe) <= 0.5 || distance <= nearLimit + 0.5 { return true }
+            return peakDistances.contains { abs($0 - distance) <= step / 3 }
+        }
+        var keep = unique
+        while keep.count > limit {
+            var removeAt: Int?
+            var smallestGap = Double.greatestFiniteMagnitude
+            for index in 1..<(keep.count - 1) where !isProtected(keep[index]) {
+                let gap = keep[index] - keep[index - 1]
+                if gap < smallestGap {
+                    smallestGap = gap
+                    removeAt = index
+                }
+            }
+            guard let removeAt else { break }
+            keep.remove(at: removeAt)
+        }
+        return keep
+    }
+
+    static func fresnelClearanceLabel(profile: [ProfileSample]) -> String {
+        guard let total = profile.last?.distanceM else { return "No profile" }
+        let interior = profile.filter { $0.distanceM > 1 && total - $0.distanceM > 1 }
+        let relevant = interior.isEmpty ? profile : interior
+        guard let worst = relevant.min(by: { $0.fresnelClearanceM < $1.fresnelClearanceM }) else { return "No profile" }
+        return String(format: "%@ %+.0f m", worst.fresnelBand.title, worst.fresnelClearanceM)
     }
 
     /// Loss along an ordered path. The first point is the transmitter ground and the last is the receiver ground.
     /// A path whose terrain stays below the line of sight uses max(FSPL, two-ray).
     /// Terrain that meets or crosses that line uses FSPL plus one knife edge, without two-ray.
     /// Fresnel clearance is still reported when the ray is clear.
+    /// `multiEdge` sums Epstein-Peterson knife edges. The default remains one dominant edge.
     static func propagationLoss(
         points: [PathPoint],
         txAntennaHeightM: Double,
         rxAntennaHeightM: Double,
         frequencyMHz: Double,
-        includeProfile: Bool
+        includeProfile: Bool,
+        diffraction: DiffractionMode = .dominantEdge
     ) -> LossBreakdown {
         let total = max(points.last?.distanceM ?? 1, 1)
         let frequency = max(frequencyMHz, 0.001)
@@ -359,6 +491,8 @@ nonisolated enum PropagationMath {
         var minClearance = Double.greatestFiniteMagnitude
         var usableObstacles = 0
         var profile: [ProfileSample] = []
+        var effectiveHeights = [Double?](repeating: nil, count: points.count)
+        var vValues = [Double](repeating: -.greatestFiniteMagnitude, count: points.count)
 
         for (index, point) in points.enumerated() {
             let d1 = point.distanceM
@@ -368,10 +502,14 @@ nonisolated enum PropagationMath {
             let hasElevation = point.elevationM != nil
             let ground = point.elevationM ?? 0
             let protrusion = (ground + bulge) - chord
-            let fresnelRadius = (d1 > 1 && d2 > 1) ? sqrt(lambda * d1 * d2 / total) : 0
+            let fresnelRadius = (d1 > 1 && d2 > 1)
+                ? firstFresnelRadiusM(distance1M: d1, distance2M: d2, frequencyMHz: frequency)
+                : 0
             if hasElevation, d1 > 1, d2 > 1 {
                 usableObstacles += 1
                 let v = protrusion * sqrt((2 * total) / (lambda * d1 * d2))
+                effectiveHeights[index] = ground + bulge
+                vValues[index] = v
                 maxV = max(maxV, v)
                 if fresnelRadius > 0 {
                     minClearance = min(minClearance, -protrusion / fresnelRadius)
@@ -394,8 +532,25 @@ nonisolated enum PropagationMath {
         let fallback = usableObstacles == 0
         // v > 0 means the sampled ground meets the line of sight. Fresnel intrusion
         // below that line stays on the two-ray model; the clearance ratio still reports it.
-        let obstructed = !fallback && maxV > 0
-        let knife = obstructed ? knifeEdgeLossDb(v: maxV) : 0
+        let dominantObstructed = !fallback && maxV > 0
+        let obstructed: Bool
+        let knife: Double
+        if diffraction == .multiEdge && !fallback {
+            let multi = multiEdgeLossDb(
+                points: points,
+                effectiveHeights: effectiveHeights,
+                vValues: vValues,
+                txHeightM: hTx,
+                rxHeightM: hRx,
+                total: total,
+                lambda: lambda
+            )
+            obstructed = multi.edgeCount > 0
+            knife = obstructed ? multi.lossDb : 0
+        } else {
+            obstructed = dominantObstructed
+            knife = obstructed ? knifeEdgeLossDb(v: maxV) : 0
+        }
         let loss = obstructed ? fspl + knife : max(fspl, twoRay)
         let clearance = minClearance == .greatestFiniteMagnitude ? 1 : minClearance
         return LossBreakdown(
@@ -428,5 +583,75 @@ nonisolated enum PropagationMath {
             return GeoMath.destination(from: center, bearingDeg: bearing, distanceM: innerRadiusM)
         }
         return outer + inner
+    }
+
+    /// Epstein-Peterson: each obstruction is a knife edge between the previous and next terminal.
+    /// Losses are summed. This is not a parabolic-equation or ITWOM solution.
+    private static func multiEdgeLossDb(
+        points: [PathPoint],
+        effectiveHeights: [Double?],
+        vValues: [Double],
+        txHeightM: Double,
+        rxHeightM: Double,
+        total: Double,
+        lambda: Double
+    ) -> (lossDb: Double, edgeCount: Int) {
+        guard points.count >= 3, lambda > 0 else { return (0, 0) }
+        var indexes: [Int] = []
+        for index in 1..<(points.count - 1) {
+            guard let height = effectiveHeights[index], vValues[index] > 0 else { continue }
+            let left = effectiveHeights[index - 1] ?? height
+            let right = effectiveHeights[index + 1] ?? height
+            if height + 0.05 >= left && height + 0.05 >= right {
+                indexes.append(index)
+            }
+        }
+        if let worst = vValues.enumerated().max(by: { $0.element < $1.element }),
+           worst.element > 0,
+           worst.offset > 0,
+           worst.offset < points.count - 1,
+           !indexes.contains(worst.offset) {
+            indexes.append(worst.offset)
+            indexes.sort()
+        }
+        guard !indexes.isEmpty else { return (0, 0) }
+
+        struct Terminal {
+            var distanceM: Double
+            var heightM: Double
+        }
+        var terminals = [Terminal(distanceM: 0, heightM: txHeightM)]
+        for index in indexes {
+            guard let height = effectiveHeights[index] else { continue }
+            let distance = points[index].distanceM
+            if let previous = terminals.last, abs(distance - previous.distanceM) < 1 { continue }
+            terminals.append(Terminal(distanceM: distance, heightM: height))
+        }
+        if let previous = terminals.last, abs(total - previous.distanceM) < 1 {
+            terminals.removeLast()
+        }
+        terminals.append(Terminal(distanceM: total, heightM: rxHeightM))
+        guard terminals.count >= 3 else { return (0, 0) }
+
+        var loss = 0.0
+        var edges = 0
+        for index in 1..<(terminals.count - 1) {
+            let previous = terminals[index - 1]
+            let edge = terminals[index]
+            let next = terminals[index + 1]
+            let d1 = edge.distanceM - previous.distanceM
+            let d2 = next.distanceM - edge.distanceM
+            guard d1 > 1, d2 > 1 else { continue }
+            let span = d1 + d2
+            let line = previous.heightM + (next.heightM - previous.heightM) * (d1 / span)
+            let clearance = edge.heightM - line
+            let v = clearance * sqrt((2 * span) / (lambda * d1 * d2))
+            let edgeLoss = knifeEdgeLossDb(v: v)
+            if edgeLoss > 0 {
+                loss += edgeLoss
+                edges += 1
+            }
+        }
+        return (loss, edges)
     }
 }

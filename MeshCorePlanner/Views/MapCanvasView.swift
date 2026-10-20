@@ -16,7 +16,7 @@ struct MapCanvasView: View {
             Map(position: $store.cameraPosition) {
                 ForEach(drawnPolygons) { polygon in
                     MapPolygon(coordinates: polygon.coordinates)
-                        .foregroundStyle(polygon.color.opacity(store.overlayOpacity))
+                        .foregroundStyle(polygon.color.opacity(store.overlayOpacity * polygon.opacityScale))
                 }
                 if let measureLine {
                     MapPolyline(coordinates: measureLine, contourStyle: .geodesic)
@@ -229,6 +229,8 @@ struct MapCanvasView: View {
                 }
             }
             .pickerStyle(.segmented)
+            Toggle("Site overlay", isOn: $store.showPrimaryOverlay)
+            Toggle("Comparison overlay", isOn: $store.showComparisonOverlay)
             CoverageLegend(scale: store.colorScale, sensitivity: store.receiverSensitivityDbm)
         }
         .padding()
@@ -245,21 +247,32 @@ struct MapCanvasView: View {
 
     private var drawnPolygons: [DrawnPolygon] {
         store.sites.filter(\.isVisible).flatMap { site in
-            guard let grid = store.coverage[site.id] else { return [DrawnPolygon]() }
-            return grid.cells.compactMap { cell in
-                guard cell.rssiDbm >= store.receiverSensitivityDbm else { return nil }
-                return DrawnPolygon(
-                    id: "\(site.id.uuidString)-\(cell.id)",
-                    coordinates: cell.polygon.map {
-                        CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-                    },
-                    color: CoverageStyle.color(
-                        rssi: cell.rssiDbm,
-                        sensitivity: store.receiverSensitivityDbm,
-                        scale: store.colorScale
-                    )
-                )
+            var drawn: [DrawnPolygon] = []
+            if store.showPrimaryOverlay, let grid = store.coverage[site.id] {
+                drawn.append(contentsOf: polygons(for: site, grid: grid, prefix: "site", opacityScale: 1))
             }
+            if store.showComparisonOverlay, let grid = store.comparisonCoverage[site.id] {
+                drawn.append(contentsOf: polygons(for: site, grid: grid, prefix: "compare", opacityScale: 0.55))
+            }
+            return drawn
+        }
+    }
+
+    private func polygons(for site: PlannedSite, grid: CoverageGrid, prefix: String, opacityScale: Double) -> [DrawnPolygon] {
+        grid.cells.compactMap { cell in
+            guard cell.rssiDbm >= store.receiverSensitivityDbm else { return nil }
+            return DrawnPolygon(
+                id: "\(prefix)-\(site.id.uuidString)-\(cell.id)",
+                coordinates: cell.polygon.map {
+                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                },
+                color: CoverageStyle.color(
+                    rssi: cell.rssiDbm,
+                    sensitivity: store.receiverSensitivityDbm,
+                    scale: store.colorScale
+                ),
+                opacityScale: opacityScale
+            )
         }
     }
 
@@ -311,6 +324,7 @@ private struct DrawnPolygon: Identifiable {
     var id: String
     var coordinates: [CLLocationCoordinate2D]
     var color: Color
+    var opacityScale: Double = 1
 }
 
 enum CoverageStyle {

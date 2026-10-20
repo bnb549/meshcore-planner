@@ -100,9 +100,18 @@ struct SiteInspectorView: View {
                     }
                 }
                 .accessibilityLabel("Coverage density")
-                if store.runningSiteIDs.contains(site.id) {
+                Toggle("Include clutter", isOn: $store.includeClutter)
+                    .accessibilityHint("Adds ESA WorldCover attenuation after the selected model. Off matches the model with no land-cover loss. Recompute to apply it.")
+                Toggle("Multi-edge diffraction", isOn: $store.multiEdgeDiffraction)
+                    .disabled(store.propagationModel != .simplified)
+                    .accessibilityHint("Simplified engine only. Sums knife edges when several ridges block the path.")
+                if store.propagationModel == .simplified && store.multiEdgeDiffraction {
+                    InspectorNote(text: "Multi-edge diffraction is an Epstein-Peterson approximation. It is not a parabolic-equation or ITWOM solution.")
+                }
+                let busy = store.runningSiteIDs.contains(site.id) || store.comparisonRunningIDs.contains(site.id)
+                if busy {
                     ProgressView(value: store.progress[site.id] ?? 0) {
-                        Text("Estimating coverage")
+                        Text(store.comparisonRunningIDs.contains(site.id) ? "Comparing engines" : "Estimating coverage")
                     }
                     Button("Cancel") { store.cancelCoverage(for: site.id) }
                         .frame(minHeight: 44)
@@ -117,9 +126,18 @@ struct SiteInspectorView: View {
                 if let grid = store.coverage[site.id] {
                     let stats = grid.statistics(sensitivityDbm: store.receiverSensitivityDbm)
                     InspectorFact(title: "Engine", value: grid.engineName)
+                    if let confidence = grid.confidence {
+                        InspectorFact(title: "Confidence", value: confidence.title)
+                    }
                     InspectorFact(title: "Area above threshold", value: FieldFormat.area(stats.areaAboveThresholdM2))
                     InspectorFact(title: "Max usable range", value: FieldFormat.distance(stats.maxUsableRangeM))
                     InspectorFact(title: "Disk covered", value: FieldFormat.percent(stats.percentOfDisk))
+                    if let clutterSummary = grid.clutterSummary {
+                        InspectorNote(text: clutterSummary)
+                    }
+                    if let dataNote = grid.dataNote {
+                        InspectorNote(text: dataNote)
+                    }
                     if store.coverageFingerprintsMatch(site) == false {
                         InspectorNote(text: "This overlay is out of date. Recompute to apply the current engine and settings.")
                     }
@@ -127,7 +145,37 @@ struct SiteInspectorView: View {
                         InspectorNote(text: "Terrain was missing or rejected, so this overlay uses the simplified model.")
                     }
                 }
-                InspectorNote(text: "Coverage is this site’s footprint for a handheld at \(String(format: "%.1f", store.receiverHeightM)) m and \(String(format: "%.1f", store.receiverGainDbi)) dBi. Range \(String(format: "%.0f", store.maxRangeKm)) km.")
+                InspectorNote(text: "Coverage is this site’s footprint for a handheld at \(String(format: "%.1f", store.receiverHeightM)) m and \(String(format: "%.1f", store.receiverGainDbi)) dBi. Range \(String(format: "%.0f", store.maxRangeKm)) km. Clutter and diffraction changes apply on the next recompute.")
+            }
+
+            Section("Compare engines") {
+                Picker("Comparison", selection: $store.comparisonRecipe) {
+                    ForEach(EngineRecipe.allCases) { recipe in
+                        Text(recipe.title).tag(recipe)
+                    }
+                }
+                .accessibilityLabel("Comparison engine")
+                Stepper(value: $store.comparisonThresholdDb, in: 1...30, step: 1) {
+                    Text("Area threshold \(Int(store.comparisonThresholdDb.rounded())) dB")
+                }
+                Toggle("Show this site", isOn: $store.showPrimaryOverlay)
+                Toggle("Show comparison", isOn: $store.showComparisonOverlay)
+                if !store.runningSiteIDs.contains(site.id) && !store.comparisonRunningIDs.contains(site.id) {
+                    Button("Compare Coverage") { store.compareCoverage(for: site) }
+                        .disabled(store.coverage[site.id] == nil || site.validationError() != nil)
+                        .frame(minHeight: 44)
+                        .accessibilityHint("Runs the comparison engine on this site and shows the difference in dB.")
+                }
+                if let stats = store.comparisonStats[site.id] {
+                    InspectorFact(title: "Compared", value: stats.secondaryName)
+                    InspectorFact(title: "Mean delta", value: String(format: "%+.1f dB", stats.meanDeltaDb))
+                    InspectorFact(title: "Max delta", value: String(format: "%.1f dB", stats.maxAbsDeltaDb))
+                    InspectorFact(
+                        title: "Area beyond \(Int(stats.thresholdDb.rounded())) dB",
+                        value: FieldFormat.area(stats.areaBeyondThresholdM2)
+                    )
+                    InspectorNote(text: "Mean delta is \(stats.primaryName) minus \(stats.secondaryName). Both overlays follow this site’s visibility.")
+                }
             }
 
             Section("High point") {

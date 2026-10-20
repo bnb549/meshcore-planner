@@ -53,7 +53,7 @@ struct SettingsView: View {
             }
 
             Section("Land-cover clutter") {
-                InspectorNote(text: "Defaults are through-clutter loss near 900 MHz. A ray above the class height is not charged. Tree cover starts at 0.40 dB/m and built-up at 0.50 dB/m. Open land is near zero. Classes come from ESA WorldCover 2021.")
+                InspectorNote(text: "Defaults are a capped planning excess near 900 MHz. A ray above the class height is not charged. Tree cover starts at 0.02 dB/m and stops at 20 dB on a path. Built-up starts at 0.01 dB/m and stops at 18 dB. Other classes keep their earlier rates and stop at 24 dB. The whole path stops at 35 dB. Open water, bare ground, and snow stay at zero. Raise a rate if you want that class to reach its cap on a shorter path. Reset Clutter Defaults loads these rates. A table you already saved stays as you saved it until you reset.")
                 ForEach($store.clutterTable.classes) { $entry in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(entry.name)

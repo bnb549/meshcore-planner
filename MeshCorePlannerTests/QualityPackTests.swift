@@ -8,7 +8,8 @@ final class QualityPackTests: XCTestCase {
     func testClutterAddsExpectedDecibelsForTreeCover() {
         let table = ClutterTable.meshCoreDefault
         let tree = table.setting(for: 10)
-        XCTAssertEqual(tree?.attenuationDbPerMeter ?? 0, 0.40, accuracy: 0.001)
+        XCTAssertEqual(tree?.attenuationDbPerMeter ?? 0, 0.02, accuracy: 0.0001)
+        XCTAssertEqual(tree?.maxLossDb ?? 0, 20, accuracy: 0.001)
         let points = [
             PathPoint(distanceM: 0, elevationM: 100, landCoverCode: 10),
             PathPoint(distanceM: 100, elevationM: 100, landCoverCode: 10)
@@ -20,9 +21,91 @@ final class QualityPackTests: XCTestCase {
             frequencyMHz: 900,
             table: table
         )
-        XCTAssertEqual(result.lossDb, 40, accuracy: 0.05)
+        XCTAssertEqual(result.lossDb, 2, accuracy: 0.05)
         XCTAssertTrue(result.summary.localizedCaseInsensitiveContains("tree"))
         XCTAssertFalse(result.incomplete)
+    }
+
+    func testSuburbanDefaultsStayInsideFiveToThirtyFiveDecibels() {
+        let table = ClutterTable.meshCoreDefault
+        XCTAssertEqual(table.setting(for: 50)?.attenuationDbPerMeter ?? 0, 0.01, accuracy: 0.0001)
+        XCTAssertEqual(table.setting(for: 50)?.maxLossDb ?? 0, 18, accuracy: 0.001)
+        XCTAssertEqual(table.setting(for: 30)?.attenuationDbPerMeter ?? -1, 0.01, accuracy: 0.0001)
+        XCTAssertEqual(table.setting(for: 60)?.attenuationDbPerMeter ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(table.setting(for: 80)?.attenuationDbPerMeter ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(table.setting(for: 95)?.attenuationDbPerMeter ?? -1, 0.35, accuracy: 0.0001)
+        XCTAssertEqual(ClutterTable.maxTotalLossDb, 35, accuracy: 0.001)
+        XCTAssertLessThan(table.setting(for: 10)?.maxLossDb ?? 99, table.setting(for: 20)?.maxLossDb ?? 0)
+        XCTAssertLessThan(table.setting(for: 50)?.maxLossDb ?? 99, table.setting(for: 95)?.maxLossDb ?? 0)
+
+        // 4 km: 600 m trees + 800 m built-up + grass. 12 dB + 8 dB.
+        let suburb = clutterLoss(mixedPath(treeM: 600, builtM: 800, openM: 2_600), table: table)
+        XCTAssertEqual(suburb.lossDb, 20, accuracy: 0.05)
+        XCTAssertGreaterThanOrEqual(suburb.lossDb, 5)
+        XCTAssertLessThanOrEqual(suburb.lossDb, 35)
+
+        // 2 km light cover: 200 m trees + 300 m built-up.
+        let light = clutterLoss(mixedPath(treeM: 200, builtM: 300, openM: 1_500), table: table)
+        XCTAssertEqual(light.lossDb, 7, accuracy: 0.05)
+        XCTAssertGreaterThanOrEqual(light.lossDb, 5)
+        XCTAssertLessThanOrEqual(light.lossDb, 35)
+
+        // 8 km: each class hits its own cap, then the 35 dB path cap.
+        let longer = clutterLoss(mixedPath(treeM: 2_000, builtM: 2_000, openM: 4_000), table: table)
+        XCTAssertEqual(longer.lossDb, 35, accuracy: 0.05)
+        XCTAssertTrue(longer.summary.localizedCaseInsensitiveContains("path cap"))
+    }
+
+    func testLongTreePathDoesNotExceedTheClassCap() {
+        let table = ClutterTable.meshCoreDefault
+        let cap = table.setting(for: 10)?.maxLossDb ?? -1
+        let oneSegment = clutterLoss([
+            PathPoint(distanceM: 0, elevationM: 100, landCoverCode: 10),
+            PathPoint(distanceM: 50_000, elevationM: 100, landCoverCode: 10)
+        ], table: table)
+        XCTAssertEqual(oneSegment.lossDb, cap, accuracy: 0.05)
+        XCTAssertLessThan(oneSegment.lossDb, 100)
+
+        let many = clutterLoss(
+            stride(from: 0.0, through: 50_000, by: 250).map {
+                PathPoint(distanceM: $0, elevationM: 100, landCoverCode: 10)
+            },
+            table: table
+        )
+        XCTAssertEqual(many.lossDb, cap, accuracy: 0.05)
+        XCTAssertLessThanOrEqual(many.lossDb, ClutterTable.maxTotalLossDb)
+    }
+
+    func testSavedClutterTableKeepsCustomRates() throws {
+        let json = """
+        {"classes":[
+          {"code":10,"name":"Tree cover","attenuationDbPerMeter":0.4,"heightM":15},
+          {"code":50,"name":"Built-up","attenuationDbPerMeter":0.55,"heightM":9}
+        ]}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(ClutterTable.self, from: json)
+        let merged = decoded.mergingMissingDefaults()
+        XCTAssertEqual(merged.setting(for: 10)?.attenuationDbPerMeter ?? 0, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(merged.setting(for: 10)?.heightM ?? 0, 15, accuracy: 0.001)
+        XCTAssertEqual(merged.setting(for: 50)?.attenuationDbPerMeter ?? 0, 0.55, accuracy: 0.0001)
+        XCTAssertEqual(merged.setting(for: 50)?.heightM ?? 0, 9, accuracy: 0.001)
+        XCTAssertEqual(merged.setting(for: 10)?.maxLossDb ?? 0, 20, accuracy: 0.001)
+        XCTAssertEqual(merged.setting(for: 50)?.maxLossDb ?? 0, 18, accuracy: 0.001)
+        XCTAssertNotEqual(
+            merged.setting(for: 10)?.attenuationDbPerMeter,
+            ClutterTable.meshCoreDefault.setting(for: 10)?.attenuationDbPerMeter
+        )
+        XCTAssertEqual(merged.setting(for: 30)?.attenuationDbPerMeter ?? -1, 0.01, accuracy: 0.0001)
+
+        let capped = clutterLoss([
+            PathPoint(distanceM: 0, elevationM: 50, landCoverCode: 10),
+            PathPoint(distanceM: 10_000, elevationM: 50, landCoverCode: 10)
+        ], table: merged)
+        XCTAssertEqual(capped.lossDb, 20, accuracy: 0.05)
+
+        let encoded = try JSONDecoder().decode(ClutterTable.self, from: JSONEncoder().encode(merged))
+        XCTAssertEqual(encoded.setting(for: 10)?.attenuationDbPerMeter ?? 0, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(encoded.setting(for: 10)?.maxLossDb ?? 0, 20, accuracy: 0.001)
     }
 
     func testClutterSkipsARayAboveTheCanopy() {
@@ -52,8 +135,8 @@ final class QualityPackTests: XCTestCase {
         let off = try await plain.link(request, elevation: elevation)
         let on = try await withClutter.link(request, elevation: elevation)
         XCTAssertEqual(on.forward.pathLossDb - off.forward.pathLossDb, on.clutterLossDb, accuracy: 0.05)
-        XCTAssertEqual(on.clutterLossDb, 80, accuracy: 1)
-        XCTAssertGreaterThan(off.forward.marginDb, on.forward.marginDb + 70)
+        XCTAssertEqual(on.clutterLossDb, 4, accuracy: 0.2)
+        XCTAssertGreaterThan(off.forward.marginDb, on.forward.marginDb + 3)
         XCTAssertEqual(off.engineName, "Simplified")
         XCTAssertEqual(on.engineName, "Simplified + clutter")
         XCTAssertTrue(on.clutterSummary?.localizedCaseInsensitiveContains("tree") == true)
@@ -62,6 +145,35 @@ final class QualityPackTests: XCTestCase {
         let restored = try await disabled.link(request, elevation: elevation)
         XCTAssertEqual(restored.forward.pathLossDb, off.forward.pathLossDb, accuracy: 0.01)
         XCTAssertEqual(restored.clutterLossDb, 0, accuracy: 0.001)
+    }
+
+    func testDisablingClutterMatchesPureITM() async throws {
+        let request = radioLink(distance: 4_000, height: 2, frequency: 900)
+        let elevation = FixedElevation(meters: 100)
+        let pure = ITMPropagationEngine()
+        let off = ITMPropagationEngine(options: SimulationOptions(
+            includeClutter: false,
+            clutterTable: .meshCoreDefault,
+            landCover: FixedLandCover(code: 10)
+        ))
+        let on = ITMPropagationEngine(options: SimulationOptions(
+            includeClutter: true,
+            clutterTable: .meshCoreDefault,
+            landCover: FixedLandCover(code: 10)
+        ))
+        let baseline = try await pure.link(request, elevation: elevation)
+        let restored = try await off.link(request, elevation: elevation)
+        let cluttered = try await on.link(request, elevation: elevation)
+        XCTAssertEqual(baseline.engineName, "ITM (Longley-Rice)")
+        XCTAssertEqual(restored.engineName, "ITM (Longley-Rice)")
+        XCTAssertEqual(restored.forward.pathLossDb, baseline.forward.pathLossDb, accuracy: 0.01)
+        XCTAssertEqual(restored.reverse.pathLossDb, baseline.reverse.pathLossDb, accuracy: 0.01)
+        XCTAssertEqual(restored.clutterLossDb, 0, accuracy: 0.001)
+        XCTAssertFalse(baseline.usedFreeSpaceFallback)
+        XCTAssertEqual(cluttered.engineName, "ITM + clutter")
+        XCTAssertEqual(cluttered.forward.pathLossDb - baseline.forward.pathLossDb, cluttered.clutterLossDb, accuracy: 0.05)
+        XCTAssertGreaterThan(cluttered.clutterLossDb, 0)
+        XCTAssertLessThanOrEqual(cluttered.clutterLossDb, ClutterTable.maxTotalLossDb)
     }
 
     func testFresnelRadiusMatchesTheStandardFormula() {
@@ -271,6 +383,29 @@ final class QualityPackTests: XCTestCase {
         XCTAssertEqual(high, .high)
         XCTAssertEqual(coarse, .low)
         XCTAssertEqual(partial, .medium)
+    }
+
+    private func clutterLoss(_ points: [PathPoint], table: ClutterTable) -> ClutterLossResult {
+        ClutterMath.loss(
+            points: points,
+            txAntennaHeightM: 2,
+            rxAntennaHeightM: 2,
+            frequencyMHz: 900,
+            table: table
+        )
+    }
+
+    /// Tree, then built-up, then grassland. The segment class is the class at its start.
+    private func mixedPath(treeM: Double, builtM: Double, openM: Double) -> [PathPoint] {
+        let builtStart = treeM
+        let openStart = treeM + builtM
+        let end = openStart + openM
+        return [
+            PathPoint(distanceM: 0, elevationM: 100, landCoverCode: 10),
+            PathPoint(distanceM: builtStart, elevationM: 100, landCoverCode: 50),
+            PathPoint(distanceM: openStart, elevationM: 100, landCoverCode: 30),
+            PathPoint(distanceM: end, elevationM: 100, landCoverCode: 30)
+        ]
     }
 
     private func flatPoints(distance: Double, elevation: Double) -> [PathPoint] {

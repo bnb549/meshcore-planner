@@ -10,8 +10,8 @@ Build number source of truth: Xcode `CURRENT_PROJECT_VERSION` (integer, monotoni
 
 ## Current
 
-- Marketing: 0.3.0
-- Build: 3
+- Marketing: 0.3.1
+- Build: 4
 - Channel: local
 - Date: 2026-10-19
 - Git: main
@@ -52,3 +52,10 @@ Build number source of truth: Xcode `CURRENT_PROJECT_VERSION` (integer, monotoni
 - ITM runs show a High / Medium / Low confidence badge from the variability percentages and the elevation sample spacing.
 - Known limits: No ITWOM, no building footprints, no LiDAR, and no live radio. PlannedSite records and the per-site visibility toggle are unchanged.
 - Files introduced: LandCoverService and the clutter attenuation table. ElevationService, both propagation engines, the profile chart, and the comparison section were extended.
+
+### 0.3.1 — 2026-10-19 — build 4
+
+- Tuned land-cover clutter so a suburban path of a few kilometers adds about 5–35 dB instead of climbing past 100 dB. After each segment is computed, that class’s contribution is clamped, and the path is then limited to 35 dB.
+- Tree cover now defaults to 0.02 dB/m with a 20 dB path cap. Built-up defaults to 0.01 dB/m with an 18 dB path cap. Other classes keep their 0.3.0 rates and are capped at 24 dB. Tree cover and built-up are the strictest caps.
+- Include clutter is still an optional add-on after ITM or Simplified. Turning it off restores the pure engine. Saved clutter tables keep their attenuation rates. New installs, and Reset Clutter Defaults, use the lower rates. An older saved table with no cap stored picks up these caps without replacing the rates.
+- Known limits: No ITWOM, no building footprints, no LiDAR, and no live radio. PlannedSite records and the per-site visibility toggle are unchanged.

@@ -24,10 +24,10 @@ struct AboutView: View {
     }
 
     private var marketing: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3.1"
     }
 
     private var build: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "3"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "4"
     }
 }

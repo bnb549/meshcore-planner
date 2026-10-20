@@ -10,27 +10,81 @@ nonisolated struct ClutterClassSetting: Codable, Equatable, Identifiable, Sendab
     var name: String
     var attenuationDbPerMeter: Double
     var heightM: Double
+    /// Maximum dB this class can add on one path, after the frequency scale.
+    var maxLossDb: Double
 
     var id: Int { code }
+
+    private enum CodingKeys: String, CodingKey {
+        case code, name, attenuationDbPerMeter, heightM, maxLossDb
+    }
+
+    init(code: Int, name: String, attenuationDbPerMeter: Double, heightM: Double, maxLossDb: Double) {
+        self.code = code
+        self.name = name
+        self.attenuationDbPerMeter = attenuationDbPerMeter
+        self.heightM = heightM
+        self.maxLossDb = maxLossDb
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let code = try container.decode(Int.self, forKey: .code)
+        self.code = code
+        name = try container.decode(String.self, forKey: .name)
+        attenuationDbPerMeter = try container.decode(Double.self, forKey: .attenuationDbPerMeter)
+        heightM = try container.decode(Double.self, forKey: .heightM)
+        // Older saved tables have no cap. Keep their rates and fill the shipped cap.
+        maxLossDb = try container.decodeIfPresent(Double.self, forKey: .maxLossDb)
+            ?? ClutterTable.defaultMaxLossDb(for: code)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(code, forKey: .code)
+        try container.encode(name, forKey: .name)
+        try container.encode(attenuationDbPerMeter, forKey: .attenuationDbPerMeter)
+        try container.encode(heightM, forKey: .heightM)
+        try container.encode(maxLossDb, forKey: .maxLossDb)
+    }
 }
 
-/// User-editable attenuation. Defaults are through-canopy values near 900 MHz.
-/// A ray above `heightM` is not charged. Bare ground, snow, and water add nothing.
+/// User-editable attenuation. A ray above `heightM` is not charged.
+/// Bare ground, snow, and water add nothing.
+///
+/// 0.3.1 planning caps, applied after each segment and again to the path:
+/// tree cover 0.02 dB/m and at most 20 dB; built-up 0.01 dB/m and at most 18 dB.
+/// Those two caps are stricter than every other class (24 dB). The path then
+/// stops at 35 dB. Other class rates are the 0.3.0 values. At 900 MHz, 2 m
+/// antennas, and flat ground, 600 m of trees plus 800 m of built-up (a 4 km
+/// path, the rest grass) adds 20 dB. A longer mixed path stops at 35 dB.
 nonisolated struct ClutterTable: Codable, Equatable, Sendable {
     var classes: [ClutterClassSetting]
 
+    /// Ceiling on the sum of every class on one path.
+    static let maxTotalLossDb = 35.0
+
+    /// Tree cover and built-up are the strictest. Every other class uses 24 dB.
+    static func defaultMaxLossDb(for code: Int) -> Double {
+        switch code {
+        case 10: return 20
+        case 50: return 18
+        default: return 24
+        }
+    }
+
     static let meshCoreDefault = ClutterTable(classes: [
-        ClutterClassSetting(code: 10, name: "Tree cover", attenuationDbPerMeter: 0.40, heightM: 15),
-        ClutterClassSetting(code: 20, name: "Shrubland", attenuationDbPerMeter: 0.08, heightM: 2),
-        ClutterClassSetting(code: 30, name: "Grassland", attenuationDbPerMeter: 0.01, heightM: 0.5),
-        ClutterClassSetting(code: 40, name: "Cropland", attenuationDbPerMeter: 0.02, heightM: 1),
-        ClutterClassSetting(code: 50, name: "Built-up", attenuationDbPerMeter: 0.50, heightM: 10),
-        ClutterClassSetting(code: 60, name: "Bare or sparse", attenuationDbPerMeter: 0, heightM: 0),
-        ClutterClassSetting(code: 70, name: "Snow and ice", attenuationDbPerMeter: 0, heightM: 0),
-        ClutterClassSetting(code: 80, name: "Open water", attenuationDbPerMeter: 0, heightM: 0),
-        ClutterClassSetting(code: 90, name: "Herbaceous wetland", attenuationDbPerMeter: 0.05, heightM: 1),
-        ClutterClassSetting(code: 95, name: "Mangrove", attenuationDbPerMeter: 0.35, heightM: 12),
-        ClutterClassSetting(code: 100, name: "Moss and lichen", attenuationDbPerMeter: 0.02, heightM: 0.3)
+        ClutterClassSetting(code: 10, name: "Tree cover", attenuationDbPerMeter: 0.02, heightM: 15, maxLossDb: defaultMaxLossDb(for: 10)),
+        ClutterClassSetting(code: 20, name: "Shrubland", attenuationDbPerMeter: 0.08, heightM: 2, maxLossDb: defaultMaxLossDb(for: 20)),
+        ClutterClassSetting(code: 30, name: "Grassland", attenuationDbPerMeter: 0.01, heightM: 0.5, maxLossDb: defaultMaxLossDb(for: 30)),
+        ClutterClassSetting(code: 40, name: "Cropland", attenuationDbPerMeter: 0.02, heightM: 1, maxLossDb: defaultMaxLossDb(for: 40)),
+        ClutterClassSetting(code: 50, name: "Built-up", attenuationDbPerMeter: 0.01, heightM: 10, maxLossDb: defaultMaxLossDb(for: 50)),
+        ClutterClassSetting(code: 60, name: "Bare or sparse", attenuationDbPerMeter: 0, heightM: 0, maxLossDb: defaultMaxLossDb(for: 60)),
+        ClutterClassSetting(code: 70, name: "Snow and ice", attenuationDbPerMeter: 0, heightM: 0, maxLossDb: defaultMaxLossDb(for: 70)),
+        ClutterClassSetting(code: 80, name: "Open water", attenuationDbPerMeter: 0, heightM: 0, maxLossDb: defaultMaxLossDb(for: 80)),
+        ClutterClassSetting(code: 90, name: "Herbaceous wetland", attenuationDbPerMeter: 0.05, heightM: 1, maxLossDb: defaultMaxLossDb(for: 90)),
+        ClutterClassSetting(code: 95, name: "Mangrove", attenuationDbPerMeter: 0.35, heightM: 12, maxLossDb: defaultMaxLossDb(for: 95)),
+        ClutterClassSetting(code: 100, name: "Moss and lichen", attenuationDbPerMeter: 0.02, heightM: 0.3, maxLossDb: defaultMaxLossDb(for: 100))
     ])
 
     func setting(for code: Int) -> ClutterClassSetting? {
@@ -49,7 +103,7 @@ nonisolated struct ClutterTable: Codable, Equatable, Sendable {
     func fingerprint() -> String {
         classes
             .sorted { $0.code < $1.code }
-            .map { String(format: "%d:%.3f:%.1f", $0.code, $0.attenuationDbPerMeter, $0.heightM) }
+            .map { String(format: "%d:%.3f:%.1f:%.1f", $0.code, $0.attenuationDbPerMeter, $0.heightM, $0.maxLossDb) }
             .joined(separator: ",")
     }
 }
@@ -70,6 +124,7 @@ nonisolated enum ClutterMath {
     }
 
     /// Additive loss for the portion of the path where the straight ray is below the class height.
+    /// Each segment is clamped to the remaining per-class cap and the remaining 35 dB path cap before it is added.
     /// Missing class or elevation on a segment adds nothing and marks the result incomplete.
     static func loss(
         points: [PathPoint],
@@ -113,7 +168,11 @@ nonisolated enum ClutterMath {
             let chord = hTx + (hRx - hTx) * (mid / total)
             let aboveGround = chord - (startGround + endGround) / 2
             guard aboveGround < setting.heightM else { continue }
-            let segmentLoss = setting.attenuationDbPerMeter * scale * length
+            let raw = setting.attenuationDbPerMeter * scale * length
+            let already = charged[code]?.loss ?? 0
+            let classRoom = max(0, setting.maxLossDb - already)
+            let pathRoom = max(0, ClutterTable.maxTotalLossDb - lossDb)
+            let segmentLoss = min(raw, min(classRoom, pathRoom))
             lossDb += segmentLoss
             var entry = charged[code] ?? (0, 0)
             entry.distance += length
@@ -129,7 +188,11 @@ nonisolated enum ClutterMath {
         let summary: String
         if lossDb > 0 {
             let list = parts.joined(separator: ", ")
-            summary = String(format: "Clutter added %.1f dB from %@.", lossDb, list)
+            if lossDb >= ClutterTable.maxTotalLossDb - 0.05 {
+                summary = String(format: "Clutter added %.1f dB from %@. That is the %.0f dB path cap.", lossDb, list, ClutterTable.maxTotalLossDb)
+            } else {
+                summary = String(format: "Clutter added %.1f dB from %@.", lossDb, list)
+            }
         } else if incomplete {
             summary = "Land cover is incomplete. No clutter loss was added where the class was unknown."
         } else {
